@@ -37,6 +37,27 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     { value: 'confirmado_repetido', label: 'Confirmado repetido' }
   ];
 
+  const finalidadConsultaOptions = [
+    { value: '', label: 'Seleccione una opción' },
+    { value: 'valoracion_integral_promocion_mantenimiento', label: 'Valoración integral para la promoción y mantenimiento' },
+    { value: 'deteccion_temprana_enfermedad_general', label: 'Detección temprana de enfermedad general' },
+    { value: 'deteccion_temprana_enfermedad_laboral', label: 'Detección temprana de enfermedad laboral' },
+    { value: 'diagnostico', label: 'Diagnóstico' },
+    { value: 'tratamiento', label: 'Tratamiento' },
+    { value: 'rehabilitacion', label: 'Rehabilitación' },
+    { value: 'paliacion', label: 'Paliación' },
+    { value: 'planificacion_familiar_anticoncepcion', label: 'Planificación familiar y anticoncepción' },
+    { value: 'promocion_apoyo_lactancia_materna', label: 'Promoción y apoyo a la lactancia materna' },
+    { value: 'atencion_basica_orientacion_familiar', label: 'Atención básica de orientación familiar' },
+    { value: 'atencion_cuidado_preconcepcional', label: 'Atención para el cuidado preconcepcional' },
+    { value: 'atencion_cuidado_prenatal', label: 'Atención para el cuidado prenatal' },
+    { value: 'interrupcion_voluntaria_embarazo', label: 'Interrupción voluntaria del embarazo' },
+    { value: 'atencion_parto_puerperio', label: 'Atención del parto y puerperio' },
+    { value: 'atencion_seguimiento_recien_nacido', label: 'Atención para el seguimiento del recién nacido' },
+    { value: 'modificacion_estetica_corporal', label: 'Modificación de la estética corporal (fines estéticos)' },
+    { value: 'otra', label: 'Otra' }
+  ];
+
   const causaExternaOptions = [
     { value: '', label: 'Seleccione una opción' },
     { value: 'accidente_trabajo', label: 'Accidente de trabajo' },
@@ -177,7 +198,7 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
           <div>
             <label className="form-label">Finalidad consulta</label>
             <select name="finalidadConsulta" className="input-field" value={form.finalidadConsulta} onChange={update}>
-              {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              {finalidadConsultaOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
 
