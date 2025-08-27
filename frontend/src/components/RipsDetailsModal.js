@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 // Modal de Detalles RIPS con 11 selectores y textos de colocación.
 // Las opciones serán proporcionadas posteriormente; por ahora se usan placeholders.
@@ -16,6 +16,8 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     ambitoAtencion: '',
     tipoServicio: ''
   });
+
+  const panelRef = useRef(null);
 
   useEffect(() => {
     if (isOpen && initialValues) {
@@ -196,9 +198,21 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     onClose && onClose();
   };
 
+  const handleWheelCapture = (e) => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const atTop = panel.scrollTop <= 0;
+    const atBottom = Math.ceil(panel.scrollTop + panel.clientHeight) >= panel.scrollHeight;
+    const isSelect = e.target && e.target.tagName === 'SELECT';
+    if (isSelect || (atTop && e.deltaY < 0) || (atBottom && e.deltaY > 0)) {
+      panel.scrollTop += e.deltaY;
+      e.preventDefault();
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+      <div ref={panelRef} onWheelCapture={handleWheelCapture} className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto overscroll-contain">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <h2 className="text-xl font-bold text-gray-900">Establecer detalles de la consulta</h2>
