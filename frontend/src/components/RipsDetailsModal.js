@@ -210,6 +210,13 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     }
   };
 
+  const openSelectList = (e) => {
+    try { e.target.size = 6; } catch (_) {}
+  };
+  const closeSelectList = (e) => {
+    try { e.target.size = 1; } catch (_) {}
+  };
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div ref={panelRef} onWheelCapture={handleWheelCapture} className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto overscroll-contain">
@@ -232,7 +239,7 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
         <div className="p-6 space-y-5">
           <div>
             <label className="form-label">Causa externa</label>
-            <select name="causaExterna" className="input-field" value={form.causaExterna} onChange={update}>
+            <select name="causaExterna" className="input-field" value={form.causaExterna} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
               <option value="">Seleccione una opción</option>
               {causaExternaFlatOptions.map(o => (
                 <option key={o.value} value={o.value}>{o.label}</option>
@@ -242,21 +249,21 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
 
           <div>
             <label className="form-label">Tipo de diagnóstico</label>
-            <select name="tipoDiagnostico" className="input-field" value={form.tipoDiagnostico} onChange={update}>
+            <select name="tipoDiagnostico" className="input-field" value={form.tipoDiagnostico} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
               {tipoDiagnosticoOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
 
           <div>
             <label className="form-label">Finalidad consulta</label>
-            <select name="finalidadConsulta" className="input-field" value={form.finalidadConsulta} onChange={update}>
+            <select name="finalidadConsulta" className="input-field" value={form.finalidadConsulta} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
               {finalidadConsultaOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
 
           <div>
             <label className="form-label">Finalidad procedimiento</label>
-            <select name="finalidadProcedimiento" className="input-field" value={form.finalidadProcedimiento} onChange={update}>
+            <select name="finalidadProcedimiento" className="input-field" value={form.finalidadProcedimiento} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
               {finalidadProcedimientoOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
@@ -271,13 +278,13 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
           <div>
             <label className="form-label">Diagnósticos secundarios</label>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <select name="diagnosticoSecundario1" className="input-field" value={form.diagnosticoSecundario1} onChange={update}>
+              <select name="diagnosticoSecundario1" className="input-field" value={form.diagnosticoSecundario1} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
                 {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
               </select>
-              <select name="diagnosticoSecundario2" className="input-field" value={form.diagnosticoSecundario2} onChange={update}>
+              <select name="diagnosticoSecundario2" className="input-field" value={form.diagnosticoSecundario2} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
                 {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
               </select>
-              <select name="diagnosticoSecundario3" className="input-field" value={form.diagnosticoSecundario3} onChange={update}>
+              <select name="diagnosticoSecundario3" className="input-field" value={form.diagnosticoSecundario3} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
                 {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
               </select>
             </div>
@@ -285,21 +292,21 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
 
           <div>
             <label className="form-label">Modalidad de atención</label>
-            <select name="modalidadAtencion" className="input-field" value={form.modalidadAtencion} onChange={update}>
+            <select name="modalidadAtencion" className="input-field" value={form.modalidadAtencion} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
               {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
 
           <div>
             <label className="form-label">Ámbito de atención</label>
-            <select name="ambitoAtencion" className="input-field" value={form.ambitoAtencion} onChange={update}>
+            <select name="ambitoAtencion" className="input-field" value={form.ambitoAtencion} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
               {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
 
           <div>
             <label className="form-label">Tipo de servicio</label>
-            <select name="tipoServicio" className="input-field" value={form.tipoServicio} onChange={update}>
+            <select name="tipoServicio" className="input-field" value={form.tipoServicio} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
               {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
