@@ -30,6 +30,13 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     { value: 'opcion1', label: '— Colocar opciones —' }
   ];
 
+  const tipoDiagnosticoOptions = [
+    { value: '', label: 'Seleccione una opción' },
+    { value: 'impresion_diagnostica', label: 'Impresión diagnóstica' },
+    { value: 'confirmado_nuevo', label: 'Confirmado nuevo' },
+    { value: 'confirmado_repetido', label: 'Confirmado repetido' }
+  ];
+
   const causaExternaOptions = [
     { value: '', label: 'Seleccione una opción' },
     { value: 'accidente_trabajo', label: 'Accidente de trabajo' },
@@ -163,7 +170,7 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
           <div>
             <label className="form-label">Tipo de diagnóstico</label>
             <select name="tipoDiagnostico" className="input-field" value={form.tipoDiagnostico} onChange={update}>
-              {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              {tipoDiagnosticoOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
 
