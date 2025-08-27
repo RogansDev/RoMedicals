@@ -35,6 +35,22 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     setForm(prev => ({ ...prev, [name]: value }));
   };
 
+  const handleClear = () => {
+    setForm({
+      causaExterna: '',
+      tipoDiagnostico: '',
+      finalidadConsulta: '',
+      finalidadProcedimiento: '',
+      diagnosticoPrincipal: '',
+      diagnosticoSecundario1: '',
+      diagnosticoSecundario2: '',
+      diagnosticoSecundario3: '',
+      modalidadAtencion: '',
+      ambitoAtencion: '',
+      tipoServicio: ''
+    });
+  };
+
   const handleSave = () => {
     onSave && onSave(form);
     onClose && onClose();
@@ -132,9 +148,12 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
           </div>
 
           {/* Botones */}
-          <div className="flex justify-end space-x-4 pt-4 border-t border-gray-200">
-            <button type="button" className="btn-secondary" onClick={onClose}>Cerrar</button>
-            <button type="button" className="btn-primary" onClick={handleSave}>Guardar</button>
+          <div className="flex items-center justify-between pt-4 border-t border-gray-200">
+            <button type="button" className="btn-secondary" onClick={handleClear}>Limpiar datos</button>
+            <div className="flex space-x-4">
+              <button type="button" className="btn-secondary" onClick={onClose}>Cerrar</button>
+              <button type="button" className="btn-primary" onClick={handleSave}>Guardar</button>
+            </div>
           </div>
         </div>
       </div>
