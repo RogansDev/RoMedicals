@@ -58,6 +58,43 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     { value: 'otra', label: 'Otra' }
   ];
 
+  const finalidadProcedimientoOptions = [
+    { value: '', label: 'Seleccione una opción' },
+    { value: 'diagnostico', label: 'Diagnóstico' },
+    { value: 'tratamiento', label: 'Tratamiento' },
+    { value: 'proteccion_especifica', label: 'Protección específica' },
+    { value: 'deteccion_temprana_enfermedad_general', label: 'Detección temprana de enfermedad general' },
+    { value: 'deteccion_temprana_enfermedad_laboral', label: 'Detección temprana de enfermedad laboral' },
+    { value: 'valoracion_integral_promocion_mantenimiento', label: 'Valoración integral para la promoción y mantenimiento' },
+    { value: 'rehabilitacion', label: 'Rehabilitación' },
+    { value: 'paliacion', label: 'Paliación' },
+    { value: 'planificacion_familiar_anticoncepcion', label: 'Planificación familiar y anticoncepción' },
+    { value: 'promocion_apoyo_lactancia_materna', label: 'Promoción y apoyo a la lactancia materna' },
+    { value: 'atencion_basica_orientacion_familiar', label: 'Atención básica de orientación familiar' },
+    { value: 'atencion_cuidado_preconcepcional', label: 'Atención para el cuidado preconcepcional' },
+    { value: 'atencion_cuidado_prenatal', label: 'Atención para el cuidado prenatal' },
+    { value: 'interrupcion_voluntaria_embarazo', label: 'Interrupción voluntaria del embarazo' },
+    { value: 'atencion_parto_puerperio', label: 'Atención del parto y puerperio' },
+    { value: 'atencion_seguimiento_recien_nacido', label: 'Atención para el seguimiento del recién nacido' },
+    { value: 'preparacion_maternidad_paternidad', label: 'Preparación para la maternidad y la paternidad' },
+    { value: 'promocion_actividad_fisica', label: 'Promoción de actividad física' },
+    { value: 'promocion_cesacion_tabaquismo', label: 'Promoción de la cesación del tabaquismo' },
+    { value: 'prevencion_consumo_sustancias_psicoactivas', label: 'Prevención del consumo de sustancias psicoactivas' },
+    { value: 'promocion_alimentacion_saludable', label: 'Promoción de la alimentación saludable' },
+    { value: 'promocion_derechos_sexuales_reproductivos', label: 'Promoción para el ejercicio de los derechos sexuales y derechos reproductivos' },
+    { value: 'promocion_habilidades_para_la_vida', label: 'Promoción para el desarrollo de habilidades para la vida' },
+    { value: 'promocion_estrategias_afrontamiento', label: 'Promoción para la construcción de estrategias de afrontamiento frente a sucesos vitales' },
+    { value: 'promocion_sana_convivencia_tejido_social', label: 'Promoción de la sana convivencia y el tejido social' },
+    { value: 'promocion_ambiente_seguro_cuidado', label: 'Promoción de un ambiente seguro y de cuidado y protección del ambiente' },
+    { value: 'promocion_empoderamiento_derecho_salud', label: 'Promoción del empoderamiento para el ejercicio del derecho a la salud' },
+    { value: 'promocion_practicas_crianza_cuidado_salud', label: 'Promoción para la adopción de prácticas de crianza y cuidado para la salud' },
+    { value: 'promocion_capacidad_agencia_cuidado_salud', label: 'Promoción de la capacidad de la agencia y cuidado de la salud' },
+    { value: 'desarrollo_habilidades_cognitivas', label: 'Desarrollo de habilidades cognitivas' },
+    { value: 'intervencion_colectiva', label: 'Intervención colectiva' },
+    { value: 'modificacion_estetica_corporal', label: 'Modificación de la estética corporal (fines estéticos)' },
+    { value: 'otra', label: 'Otra' }
+  ];
+
   const causaExternaOptions = [
     { value: '', label: 'Seleccione una opción' },
     { value: 'accidente_trabajo', label: 'Accidente de trabajo' },
@@ -206,7 +243,7 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
           <div>
             <label className="form-label">Finalidad procedimiento</label>
             <select name="finalidadProcedimiento" className="input-field" value={form.finalidadProcedimiento} onChange={update}>
-              {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              {finalidadProcedimientoOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
 
