@@ -49,6 +49,39 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     { value: 'ive_malformacion_incompatible_vida', label: 'IVE por malformación congénita incompatible con la vida' }
   ];
 
+  const causaExternaGroups = [
+    {
+      label: 'Accidentes',
+      options: [
+        { value: 'accidente_trabajo', label: 'Accidente de trabajo' },
+        { value: 'en_el_hogar', label: 'En el hogar' },
+        { value: 'transito_origen_comun', label: 'De tránsito de origen común' },
+        { value: 'transito_origen_laboral', label: 'De tránsito de origen laboral' },
+        { value: 'entorno_educativo', label: 'En el entorno educativo' },
+        { value: 'otro_accidente', label: 'Otro tipo de accidente' }
+      ]
+    },
+    {
+      label: 'Evento catastrófico',
+      options: [
+        { value: 'evento_catastrofico_natural', label: 'Evento catastrófico de origen natural' }
+      ]
+    },
+    {
+      label: 'Violencia / Sospecha / IVE',
+      options: [
+        { value: 'lesion_agresion', label: 'Lesión por agresión' },
+        { value: 'auto_infligida', label: 'Autoinfligida' },
+        { value: 'sospecha_violencia_fisica', label: 'Sospecha de violencia física' },
+        { value: 'violencia_psicologica', label: 'De violencia psicológica' },
+        { value: 'violencia_sexual', label: 'De violencia sexual' },
+        { value: 'negligencia_abandono', label: 'De negligencia y abandono' },
+        { value: 'ive_peligro_salud_vida', label: 'IVE relacionado con peligro a la salud o vida de la mujer' },
+        { value: 'ive_malformacion_incompatible_vida', label: 'IVE por malformación congénita incompatible con la vida' }
+      ]
+    }
+  ];
+
   const update = (e) => {
     const { name, value } = e.target;
     setForm(prev => ({ ...prev, [name]: value }));
@@ -98,7 +131,14 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
           <div>
             <label className="form-label">Causa externa</label>
             <select name="causaExterna" className="input-field" value={form.causaExterna} onChange={update}>
-              {causaExternaOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              <option value="">Seleccione una opción</option>
+              {causaExternaGroups.map(group => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.options.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </optgroup>
+              ))}
             </select>
           </div>
 
