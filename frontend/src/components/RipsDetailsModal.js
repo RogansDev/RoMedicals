@@ -54,30 +54,48 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
       label: 'Accidentes',
       options: [
         { value: 'accidente_trabajo', label: 'Accidente de trabajo' },
-        { value: 'en_el_hogar', label: 'En el hogar' },
-        { value: 'transito_origen_comun', label: 'De tránsito de origen común' },
-        { value: 'transito_origen_laboral', label: 'De tránsito de origen laboral' },
-        { value: 'entorno_educativo', label: 'En el entorno educativo' },
+        { value: 'accidente_en_el_hogar', label: 'Accidente en el hogar' },
+        { value: 'accidente_transito_origen_comun', label: 'Accidente de tránsito de origen común' },
+        { value: 'accidente_transito_origen_laboral', label: 'Accidente de tránsito de origen laboral' },
+        { value: 'accidente_entorno_educativo', label: 'Accidente en el entorno educativo' },
         { value: 'otro_accidente', label: 'Otro tipo de accidente' }
-      ]
-    },
-    {
-      label: 'Evento catastrófico',
-      options: [
-        { value: 'evento_catastrofico_natural', label: 'Evento catastrófico de origen natural' }
       ]
     },
     {
       label: 'Violencia / Sospecha / IVE',
       options: [
-        { value: 'lesion_agresion', label: 'Lesión por agresión' },
-        { value: 'auto_infligida', label: 'Autoinfligida' },
+        { value: 'lesion_por_agresion', label: 'Lesión por agresión' },
+        { value: 'lesion_auto_infligida', label: 'Lesión auto infligida' },
         { value: 'sospecha_violencia_fisica', label: 'Sospecha de violencia física' },
-        { value: 'violencia_psicologica', label: 'De violencia psicológica' },
-        { value: 'violencia_sexual', label: 'De violencia sexual' },
-        { value: 'negligencia_abandono', label: 'De negligencia y abandono' },
-        { value: 'ive_peligro_salud_vida', label: 'IVE relacionado con peligro a la salud o vida de la mujer' },
-        { value: 'ive_malformacion_incompatible_vida', label: 'IVE por malformación congénita incompatible con la vida' }
+        { value: 'sospecha_violencia_psicologica', label: 'Sospecha de violencia psicológica' },
+        { value: 'sospecha_violencia_sexual', label: 'Sospecha de violencia sexual' },
+        { value: 'sospecha_negligencia_abandono', label: 'Sospecha de negligencia y abandono' },
+        { value: 'ive_peligro_salud_vida', label: 'IVE relacionado con peligro a la Salud o vida de la mujer' },
+        { value: 'ive_malformacion_incompatible_vida', label: 'IVE por malformación congénita incompatible con la vida' },
+        { value: 'ive_violencia_sexual_incesto_inseminacion_no_consentida', label: 'IVE por violencia sexual, incesto o por inseminación artificial o transferencia de ovulo fecundado no consentida' }
+      ]
+    },
+    {
+      label: 'Salud pública y otros',
+      options: [
+        { value: 'evento_adverso_salud', label: 'Evento adverso en salud' },
+        { value: 'enfermedad_general', label: 'Enfermedad general' },
+        { value: 'enfermedad_laboral', label: 'Enfermedad laboral' },
+        { value: 'promocion_mantenimiento_salud_intervenciones_individuales', label: 'Promoción y mantenimiento de la salud – intervenciones individuales' },
+        { value: 'intervencion_colectiva', label: 'Intervención colectiva' },
+        { value: 'atencion_poblacion_materno_perinatal', label: 'Atención de población materno perinatal' },
+        { value: 'riesgo_ambiental', label: 'Riesgo ambiental' }
+      ]
+    },
+    {
+      label: 'Evento catastrófico / conflicto',
+      options: [
+        { value: 'evento_catastrofico_origen_natural', label: 'Evento catastrófico de origen natural' },
+        { value: 'otros_eventos_catastroficos', label: 'Otros eventos Catastróficos' },
+        { value: 'accidente_mina_antipersonal_map', label: 'Accidente de mina antipersonal – MAP' },
+        { value: 'accidente_artefacto_explosivo_improvisado_aei', label: 'Accidente de Artefacto Explosivo Improvisado – AEI' },
+        { value: 'accidente_municion_sin_explotar_muse', label: 'Accidente de Munición Sin Explotar- MUSE' },
+        { value: 'otra_victima_conflicto_armado_colombiano', label: 'Otra víctima de conflicto armado colombiano' }
       ]
     }
   ];
