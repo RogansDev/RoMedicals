@@ -7,6 +7,7 @@ import userService from '../services/userService';
 import { specialtiesAPI, consentsAPI } from '../config/api';
 import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
+import ImagesDocsSection from './ImagesDocsSection';
 
 const PatientFicha = () => {
   const { patientId } = useParams();
@@ -478,12 +479,10 @@ const PatientFicha = () => {
     }
   };
 
-
-
   useEffect(() => {
     // Leer el parámetro tab de la URL
     const tabFromUrl = searchParams.get('tab');
-    if (tabFromUrl && ['clinical', 'administrative', 'anamnesis', 'billing'].includes(tabFromUrl)) {
+    if (tabFromUrl && ['clinical', 'administrative', 'anamnesis'].includes(tabFromUrl)) {
       setActiveTab(tabFromUrl);
     }
     
@@ -624,10 +623,6 @@ const PatientFicha = () => {
               <span style={{ fontSize: '14px', marginRight: '8px' }}>📅</span>
               Dar cita
             </button>
-            <button className="bg-white text-blue-600 px-4 py-2 rounded hover:bg-gray-100">
-              <span style={{ fontSize: '14px', marginRight: '8px' }}>💰</span>
-              Recibir pago
-            </button>
           </div>
         </div>
       </div>
@@ -654,16 +649,6 @@ const PatientFicha = () => {
             }`}
           >
             Ficha clínica
-          </button>
-          <button
-            onClick={() => setActiveTab('billing')}
-            className={`py-2 px-1 border-b-2 font-medium text-sm ${
-              activeTab === 'billing'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            Facturación y pagos
           </button>
         </nav>
       </div>
@@ -873,9 +858,6 @@ const PatientFicha = () => {
                                       <span style={{ fontSize: '12px', marginRight: '4px' }}>⚠️</span>
                                       Detalles RIPS
                                     </button>
-                                    <button className="bg-gray-600 text-white px-3 py-1 rounded text-xs md:text-sm">
-                                      Riesgos EPS
-                                    </button>
                                   </div>
                                 </div>
                               </div>
@@ -971,9 +953,6 @@ const PatientFicha = () => {
                                       <span style={{ fontSize: '12px', marginRight: '4px' }}>⚠️</span>
                                       Detalles RIPS
                                     </button>
-                                    <button className="bg-gray-600 text-white px-3 py-1 rounded text-xs md:text-sm">
-                                      Riesgos EPS
-                                    </button>
                                   </div>
                                 </div>
                               </div>
@@ -1068,9 +1047,6 @@ const PatientFicha = () => {
                                     <button className="bg-gray-600 text-white px-3 py-1 rounded text-xs md:text-sm">
                                       <span style={{ fontSize: '12px', marginRight: '4px' }}>⚠️</span>
                                       Detalles RIPS
-                                    </button>
-                                    <button className="bg-gray-600 text-white px-3 py-1 rounded text-xs md:text-sm">
-                                      Riesgos EPS
                                     </button>
                                   </div>
                                 </div>
@@ -1205,9 +1181,6 @@ const PatientFicha = () => {
                 <button className="bg-gray-600 text-white px-3 py-1 rounded text-sm">
                   <span style={{ fontSize: '12px', marginRight: '4px' }}>⚠️</span>
                   Detalles RIPS
-                </button>
-                <button className="bg-gray-600 text-white px-3 py-1 rounded text-sm">
-                  Riesgos EPS
                 </button>
               </div>
             </div>
@@ -1722,6 +1695,11 @@ const PatientFicha = () => {
                         </>
                       )}
                     </div>
+                  ) : sec.key === 'imagesDocs' ? (
+                    <ImagesDocsSection
+                      patientId={patientId}
+                      appointmentId={viewingAttentionId}
+                    />
                   ) : (
                     <div className="p-4 bg-gray-50 rounded-md text-sm text-gray-500">
                       No hay datos en esta sección.
@@ -1927,7 +1905,7 @@ const PatientFicha = () => {
         </div>
       )}
 
-      {activeTab === 'billing' && (
+      {false && (
         <div className="card">
           <h3 className="text-lg font-medium text-gray-900 mb-4">Facturación y Pagos</h3>
           <p className="text-sm text-gray-600">
