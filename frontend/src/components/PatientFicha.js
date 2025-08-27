@@ -8,6 +8,7 @@ import { specialtiesAPI, consentsAPI } from '../config/api';
 import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
 import ImagesDocsSection from './ImagesDocsSection';
+import RipsDetailsModal from './RipsDetailsModal';
 
 const PatientFicha = () => {
   const { patientId } = useParams();
@@ -58,6 +59,15 @@ const PatientFicha = () => {
   const [productQty, setProductQty] = useState(1);
   const [productConc, setProductConc] = useState('');
   const [selectedPackageId, setSelectedPackageId] = useState('');
+  // RIPS Detalles por atención
+  const [ripsDetailsByAppt, setRipsDetailsByAppt] = useState({}); // appointmentId -> form
+  const [showRipsModal, setShowRipsModal] = useState(false);
+  const [ripsForAttentionId, setRipsForAttentionId] = useState(null);
+
+  const openRipsDetails = (attentionId) => {
+    setRipsForAttentionId(attentionId);
+    setShowRipsModal(true);
+  };
 
   // Catálogos locales (ejemplo). Puedes reemplazarlos por tu fuente real.
   const availableProducts = [
@@ -854,7 +864,7 @@ const PatientFicha = () => {
                                     </p>
                                   </div>
                                   <div className="flex space-x-2">
-                                    <button className="bg-gray-600 text-white px-3 py-1 rounded text-xs md:text-sm">
+                                    <button onClick={() => openRipsDetails(appt.id)} className="bg-gray-600 text-white px-3 py-1 rounded text-xs md:text-sm">
                                       <span style={{ fontSize: '12px', marginRight: '4px' }}>⚠️</span>
                                       Detalles RIPS
                                     </button>
@@ -1178,7 +1188,7 @@ const PatientFicha = () => {
                 </p>
               </div>
               <div className="flex space-x-2">
-                <button className="bg-gray-600 text-white px-3 py-1 rounded text-sm">
+                <button onClick={() => openRipsDetails(viewingAttentionId)} className="bg-gray-600 text-white px-3 py-1 rounded text-sm">
                   <span style={{ fontSize: '12px', marginRight: '4px' }}>⚠️</span>
                   Detalles RIPS
                 </button>
@@ -1914,9 +1924,23 @@ const PatientFicha = () => {
         </div>
       )}
 
+      {showRipsModal && (
+        <RipsDetailsModal
+          isOpen={showRipsModal}
+          onClose={() => setShowRipsModal(false)}
+          onSave={(data) => {
+            if (ripsForAttentionId) {
+              setRipsDetailsByAppt(prev => ({ ...prev, [ripsForAttentionId]: data }));
+            }
+          }}
+          initialValues={ripsDetailsByAppt[ripsForAttentionId] || {}}
+        />
+      )}
+
       
     </div>
   );
 };
 
 export default PatientFicha; 
+/** Renders RIPS modal at root level */
