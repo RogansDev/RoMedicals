@@ -128,6 +128,11 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     }
   ];
 
+  // Lista plana sin categorías, conservando los mismos nombres
+  const causaExternaFlatOptions = causaExternaGroups.reduce((acc, group) => {
+    return acc.concat(group.options);
+  }, []);
+
   const update = (e) => {
     const { name, value } = e.target;
     setForm(prev => ({ ...prev, [name]: value }));
@@ -178,12 +183,8 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
             <label className="form-label">Causa externa</label>
             <select name="causaExterna" className="input-field" value={form.causaExterna} onChange={update}>
               <option value="">Seleccione una opción</option>
-              {causaExternaGroups.map(group => (
-                <optgroup key={group.label} label={group.label}>
-                  {group.options.map(o => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </optgroup>
+              {causaExternaFlatOptions.map(o => (
+                <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
           </div>
