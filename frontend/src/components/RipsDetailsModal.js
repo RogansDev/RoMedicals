@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import OverlaySelect from './OverlaySelect';
 
 // Modal de Detalles RIPS con 11 selectores y textos de colocación.
 // Las opciones serán proporcionadas posteriormente; por ahora se usan placeholders.
@@ -239,33 +240,42 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
         <div className="p-6 space-y-5">
           <div>
             <label className="form-label">Causa externa</label>
-            <select name="causaExterna" className="input-field" value={form.causaExterna} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-              <option value="">Seleccione una opción</option>
-              {causaExternaFlatOptions.map(o => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
+            <OverlaySelect
+              name="causaExterna"
+              value={form.causaExterna}
+              options={[{ value: '', label: 'Seleccione una opción' }, ...causaExternaFlatOptions]}
+              onChange={(val)=>setForm(prev=>({ ...prev, causaExterna: val }))}
+            />
           </div>
 
           <div>
             <label className="form-label">Tipo de diagnóstico</label>
-            <select name="tipoDiagnostico" className="input-field" value={form.tipoDiagnostico} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-              {tipoDiagnosticoOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
+            <OverlaySelect
+              name="tipoDiagnostico"
+              value={form.tipoDiagnostico}
+              options={tipoDiagnosticoOptions}
+              onChange={(val)=>setForm(prev=>({ ...prev, tipoDiagnostico: val }))}
+            />
           </div>
 
           <div>
             <label className="form-label">Finalidad consulta</label>
-            <select name="finalidadConsulta" className="input-field" value={form.finalidadConsulta} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-              {finalidadConsultaOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
+            <OverlaySelect
+              name="finalidadConsulta"
+              value={form.finalidadConsulta}
+              options={finalidadConsultaOptions}
+              onChange={(val)=>setForm(prev=>({ ...prev, finalidadConsulta: val }))}
+            />
           </div>
 
           <div>
             <label className="form-label">Finalidad procedimiento</label>
-            <select name="finalidadProcedimiento" className="input-field" value={form.finalidadProcedimiento} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-              {finalidadProcedimientoOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
+            <OverlaySelect
+              name="finalidadProcedimiento"
+              value={form.finalidadProcedimiento}
+              options={finalidadProcedimientoOptions}
+              onChange={(val)=>setForm(prev=>({ ...prev, finalidadProcedimiento: val }))}
+            />
           </div>
 
           <div>
@@ -278,37 +288,25 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
           <div>
             <label className="form-label">Diagnósticos secundarios</label>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <select name="diagnosticoSecundario1" className="input-field" value={form.diagnosticoSecundario1} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-                {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-              </select>
-              <select name="diagnosticoSecundario2" className="input-field" value={form.diagnosticoSecundario2} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-                {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-              </select>
-              <select name="diagnosticoSecundario3" className="input-field" value={form.diagnosticoSecundario3} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-                {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-              </select>
+              <OverlaySelect name="diagnosticoSecundario1" value={form.diagnosticoSecundario1} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, diagnosticoSecundario1: val }))} />
+              <OverlaySelect name="diagnosticoSecundario2" value={form.diagnosticoSecundario2} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, diagnosticoSecundario2: val }))} />
+              <OverlaySelect name="diagnosticoSecundario3" value={form.diagnosticoSecundario3} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, diagnosticoSecundario3: val }))} />
             </div>
           </div>
 
           <div>
             <label className="form-label">Modalidad de atención</label>
-            <select name="modalidadAtencion" className="input-field" value={form.modalidadAtencion} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-              {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
+            <OverlaySelect name="modalidadAtencion" value={form.modalidadAtencion} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, modalidadAtencion: val }))} />
           </div>
 
           <div>
             <label className="form-label">Ámbito de atención</label>
-            <select name="ambitoAtencion" className="input-field" value={form.ambitoAtencion} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-              {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
+            <OverlaySelect name="ambitoAtencion" value={form.ambitoAtencion} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, ambitoAtencion: val }))} />
           </div>
 
           <div>
             <label className="form-label">Tipo de servicio</label>
-            <select name="tipoServicio" className="input-field" value={form.tipoServicio} onChange={update} onFocus={openSelectList} onBlur={closeSelectList} onClick={openSelectList}>
-              {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
+            <OverlaySelect name="tipoServicio" value={form.tipoServicio} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, tipoServicio: val }))} />
           </div>
 
           {/* Botones */}
