@@ -4,6 +4,63 @@ const { query } = require('../config/database');
 const { authenticateToken, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
+// --- Fichas personalizadas por atención ---
+const customFormPayloadSchema = Joi.object({
+  specialtyId: Joi.number().integer().positive().required(),
+  formId: Joi.number().integer().positive().required(),
+  values: Joi.object().default({})
+});
+
+// GET /api/appointments/:id/custom-forms
+router.get('/:id/custom-forms', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await query('SELECT id, appointment_id, specialty_id, form_id, values, created_at, updated_at FROM appointment_custom_forms WHERE appointment_id = $1', [id]);
+    return res.json({ forms: result.rows });
+  } catch (err) {
+    console.error('Error obteniendo fichas de atención:', err);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+// PUT /api/appointments/:id/custom-forms
+router.put('/:id/custom-forms', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error, value } = customFormPayloadSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ error: 'Datos inválidos', details: error.details.map(d => d.message) });
+    }
+
+    const payload = value;
+
+    // Verificar existencia de la cita
+    const appt = await query('SELECT id FROM appointments WHERE id = $1', [id]);
+    if (appt.rows.length === 0) return res.status(404).json({ error: 'Cita no encontrada' });
+
+    // Upsert por (appointment_id, form_id)
+    const existing = await query('SELECT id FROM appointment_custom_forms WHERE appointment_id = $1 AND form_id = $2', [id, payload.formId]);
+    let saved;
+    if (existing.rows.length > 0) {
+      const updated = await query(
+        'UPDATE appointment_custom_forms SET specialty_id = $1, values = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
+        [payload.specialtyId, JSON.stringify(payload.values || {}), existing.rows[0].id]
+      );
+      saved = updated.rows[0];
+    } else {
+      const inserted = await query(
+        'INSERT INTO appointment_custom_forms (appointment_id, specialty_id, form_id, values, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+        [id, payload.specialtyId, payload.formId, JSON.stringify(payload.values || {}), req.user.id]
+      );
+      saved = inserted.rows[0];
+    }
+
+    return res.json({ message: 'Ficha guardada', form: saved });
+  } catch (err) {
+    console.error('Error guardando ficha de atención:', err);
+    return res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
 
 // Esquemas de validación
 // Crear: exige fecha futura
@@ -47,7 +104,8 @@ const appointmentCreateSchema = Joi.object({
     company: Joi.string().max(100).optional().allow(''),
     policyNumber: Joi.string().max(50).optional().allow(''),
     coverage: Joi.string().max(200).optional().allow('')
-  }).optional()
+  }).optional(),
+  specialtyId: Joi.number().integer().positive().optional().allow(null)
 });
 
 // Update: permite actualizar citas pasadas (sin min('now'))
@@ -65,7 +123,8 @@ const appointmentUpdateSchema = Joi.object({
     company: Joi.string().max(100).optional().allow(''),
     policyNumber: Joi.string().max(50).optional().allow(''),
     coverage: Joi.string().max(200).optional().allow('')
-  }).optional()
+  }).optional(),
+  specialtyId: Joi.number().integer().positive().optional().allow(null)
 });
 
 // Update solo doctor
@@ -177,6 +236,7 @@ router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), as
         a.reason,
         a.notes,
         a.insurance,
+        a.specialty_id,
         a.created_at,
         a.updated_at,
         COALESCE(p.first_name, po.first_name) as patient_first_name,
@@ -189,7 +249,7 @@ router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), as
       LEFT JOIN patients p ON a.patient_id = p.id
       LEFT JOIN patients_old po ON a.patient_id = po.id
       JOIN users d ON a.doctor_id = d.id
-      LEFT JOIN specialties s ON d.specialty_id = s.id
+      LEFT JOIN specialties s ON COALESCE(a.specialty_id, d.specialty_id) = s.id
       ${whereClause}
       ORDER BY a.${finalSortBy} ${finalSortOrder}
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -246,7 +306,7 @@ router.get('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'READ'),
       LEFT JOIN patients p ON a.patient_id = p.id
       LEFT JOIN patients_old po ON a.patient_id = po.id
       JOIN users d ON a.doctor_id = d.id
-      LEFT JOIN specialties s ON d.specialty_id = s.id
+      LEFT JOIN specialties s ON COALESCE(a.specialty_id, d.specialty_id) = s.id
       WHERE a.id = $1`,
       [id]
     );
@@ -343,8 +403,8 @@ router.post('/', authenticateToken, requirePermission('APPOINTMENTS', 'CREATE'),
     const newAppointmentResult = await query(
       `INSERT INTO appointments (
         patient_id, doctor_id, appointment_date, appointment_time, duration,
-        type, status, reason, notes, insurance, created_by, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        type, status, reason, notes, insurance, specialty_id, created_by, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
       RETURNING *`,
       [
         appointmentData.patientId,
@@ -357,6 +417,7 @@ router.post('/', authenticateToken, requirePermission('APPOINTMENTS', 'CREATE'),
         appointmentData.reason || null,
         appointmentData.notes || null,
         appointmentData.insurance ? JSON.stringify(appointmentData.insurance) : null,
+        appointmentData.specialtyId || null,
         req.user.id
       ]
     );
@@ -446,8 +507,8 @@ router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'
       `UPDATE appointments SET
         patient_id = $1, doctor_id = $2, appointment_date = $3, appointment_time = $4,
         duration = $5, type = $6, status = $7, reason = $8, notes = $9, 
-        insurance = $10, updated_at = NOW()
-      WHERE id = $11
+        insurance = $10, specialty_id = $11, updated_at = NOW()
+      WHERE id = $12
       RETURNING *`,
       [
         appointmentData.patientId,
@@ -460,6 +521,7 @@ router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'
         appointmentData.reason || null,
         appointmentData.notes || null,
         appointmentData.insurance ? JSON.stringify(appointmentData.insurance) : null,
+        appointmentData.specialtyId || null,
         id
       ]
     );

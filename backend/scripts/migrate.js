@@ -90,6 +90,11 @@ async function createTables() {
     `);
     console.log('✅ Tabla appointments creada');
 
+    // Asegurar columna specialty_id en appointments
+    await query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS specialty_id INTEGER REFERENCES specialties(id)`);
+    await query('CREATE INDEX IF NOT EXISTS idx_appointments_specialty ON appointments(specialty_id)');
+    console.log('✅ Columna specialty_id verificada en appointments');
+
     // Crear tabla de notas clínicas
     await query(`
       CREATE TABLE IF NOT EXISTS clinical_notes (
@@ -306,6 +311,10 @@ async function createTables() {
     `);
     console.log('✅ Tabla uploads creada');
 
+    // Asegurar columna appointment_id en uploads
+    await query(`ALTER TABLE uploads ADD COLUMN IF NOT EXISTS appointment_id INTEGER REFERENCES appointments(id)`);
+    console.log('✅ Columna appointment_id verificada en uploads');
+
     // Crear índices para mejorar rendimiento
     // Índices de patients según esquema presente
     const patientsColumnsResult = await query(`
@@ -336,6 +345,24 @@ async function createTables() {
     await query('CREATE INDEX IF NOT EXISTS idx_custom_forms_template_specialty ON custom_forms_template(specialty_id)');
     await query('CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_forms_template_default ON custom_forms_template(specialty_id) WHERE is_default = true');
     console.log('✅ Índices creados');
+
+    // Tabla para fichas personalizadas por atención
+    await query(`
+      CREATE TABLE IF NOT EXISTS appointment_custom_forms (
+        id SERIAL PRIMARY KEY,
+        appointment_id INTEGER NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+        specialty_id INTEGER NOT NULL REFERENCES specialties(id) ON DELETE CASCADE,
+        form_id INTEGER NOT NULL,
+        values JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_by INTEGER REFERENCES users(id),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(appointment_id, form_id)
+      )
+    `);
+    await query('CREATE INDEX IF NOT EXISTS idx_appt_custom_forms_appt ON appointment_custom_forms(appointment_id)');
+    await query('CREATE INDEX IF NOT EXISTS idx_appt_custom_forms_spec ON appointment_custom_forms(specialty_id)');
+    console.log('✅ Tabla appointment_custom_forms creada');
 
     console.log('🎉 Migración completada exitosamente!');
 

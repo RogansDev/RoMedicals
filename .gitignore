@@ -58,3 +58,6 @@ __pycache__/
 *.egg-info/
 .eggs/
 
+# Backend uploads (ignore runtime files)
+backend/uploads/
+

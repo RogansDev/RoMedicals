@@ -12,6 +12,7 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
     doctorId: '',
     doctorName: '',
     specialty: '',
+    specialtyId: '',
     date: '',
     time: '',
     type: '',
@@ -39,12 +40,17 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   const loadDoctors = async () => {
     try {
       const response = await userService.getDoctors();
-      const doctorsList = response.users || [];
+      const doctorsList = response.users || response.doctors || [];
       setDoctors(doctorsList);
       
-      // Extraer especialidades únicas de los doctores
-      const uniqueSpecialties = [...new Set(doctorsList.map(d => d.specialty).filter(Boolean))];
-      setSpecialties(uniqueSpecialties);
+      // Extraer especialidades únicas (id, name)
+      const specialtyMap = new Map();
+      doctorsList.forEach(d => {
+        const id = d.specialty_id || d.specialtyId;
+        const name = d.specialty_name || d.specialty || '';
+        if (id && name && !specialtyMap.has(id)) specialtyMap.set(id, name);
+      });
+      setSpecialties(Array.from(specialtyMap.entries()).map(([id, name]) => ({ id, name })));
     } catch (error) {
       console.error('Error cargando doctores:', error);
       // Usar datos mock como fallback
@@ -55,14 +61,10 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
         { id: 4, name: 'Dr. Pedro Silva', specialty: 'Pediatría' }
       ]);
       setSpecialties([
-        'Medicina General',
-        'Cardiología',
-        'Dermatología',
-        'Pediatría',
-        'Ginecología',
-        'Ortopedia',
-        'Neurología',
-        'Psiquiatría'
+        { id: 1, name: 'Medicina General' },
+        { id: 2, name: 'Cardiología' },
+        { id: 3, name: 'Dermatología' },
+        { id: 4, name: 'Pediatría' }
       ]);
     }
   }
@@ -159,13 +161,14 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
     setFormData(prev => ({
       ...prev,
       doctorId: doctorId,
-      doctorName: selectedDoctor ? selectedDoctor.name : '',
-      specialty: selectedDoctor ? selectedDoctor.specialty : ''
+      doctorName: selectedDoctor ? (selectedDoctor.name || `${selectedDoctor.first_name} ${selectedDoctor.last_name}`) : '',
+      specialty: selectedDoctor ? (selectedDoctor.specialty || selectedDoctor.specialty_name || '') : '',
+      specialtyId: selectedDoctor ? (selectedDoctor.specialty_id || selectedDoctor.specialtyId || '') : ''
     }));
   };
 
   const validateForm = () => {
-    const required = ['patientName', 'doctorName', 'date', 'time', 'patientPhone', 'type', 'status'];
+    const required = ['patientName', 'doctorName', 'date', 'time', 'patientPhone', 'type', 'status', 'specialtyId'];
     const missing = required.filter(field => !formData[field]);
     
     if (missing.length > 0) {
@@ -199,6 +202,7 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
         duration: 30, // Duración por defecto en minutos
         type: formData.type.toUpperCase(),
         status: formData.status.toUpperCase(),
+        specialtyId: formData.specialtyId ? parseInt(formData.specialtyId) : null,
         reason: formData.notes || '',
         notes: formData.notes || ''
       };

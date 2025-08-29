@@ -1,7 +1,7 @@
 import { API_CONFIG, AUTH_CONFIG } from '../config/constants';
 
 // Usar configuración global si está disponible, sino usar valores por defecto
-const API_BASE_URL = (window.ROMEDICALS_CONFIG && window.ROMEDICALS_CONFIG.API.BASE_URL) || 'http://localhost:3001/api';
+const API_BASE_URL = (window.ROMEDICALS_CONFIG && window.ROMEDICALS_CONFIG.API.BASE_URL) || '/api';
 const AUTH_TOKEN_KEY = (window.ROMEDICALS_CONFIG && window.ROMEDICALS_CONFIG.AUTH.TOKEN_KEY) || 'authToken';
 
 class UserService {

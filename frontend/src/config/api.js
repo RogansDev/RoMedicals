@@ -198,6 +198,9 @@ export const uploadsAPI = {
   uploadDocument: (formData) => api.post('/uploads/document', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   }),
+  uploadVideo: (formData) => api.post('/uploads/multiple', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }),
   uploadMultiple: (formData) => api.post('/uploads/multiple', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   }),
@@ -205,6 +208,34 @@ export const uploadsAPI = {
   getById: (id) => api.get(`/uploads/${id}`),
   delete: (id) => api.delete(`/uploads/${id}`),
   getByPatient: (patientId, params) => api.get(`/uploads/patient/${patientId}`, { params }),
+  getByAppointment: (appointmentId, params) => api.get(`/uploads/appointment/${appointmentId}`, { params }),
+};
+
+// Utilidades para construir URLs de archivos
+export const buildFileUrl = (path) => {
+  if (!path) return '';
+  let base = API_BASE_URL || '';
+
+  // Si la base es relativa ("/api"), construir una base absoluta para assets (caso dev con :3000)
+  try {
+    if (base === '/api' && typeof window !== 'undefined' && window.location) {
+      const origin = window.location.origin;
+      // Heurística común: frontend en :3000, backend en :3001
+      const backendOrigin = origin.includes(':3000') ? origin.replace(':3000', ':3001') : origin;
+      base = `${backendOrigin}/api`;
+    }
+  } catch (_) {}
+
+  // Normalizar para servir siempre via /api/uploads
+  if (path.startsWith('/uploads')) {
+    if (base.endsWith('/api')) return `${base}${path}`;
+    return `${base}/api${path}`;
+  }
+  if (path.startsWith('/api/uploads')) {
+    // Asegurar que quede {base}/uploads/...
+    return `${base}${path.replace(/^\/api/, '')}`;
+  }
+  return `${base}${path}`;
 };
 
 export default api; 

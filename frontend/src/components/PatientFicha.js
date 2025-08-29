@@ -58,6 +58,11 @@ const PatientFicha = () => {
   const [selectedProductId, setSelectedProductId] = useState('');
   const [productQty, setProductQty] = useState(1);
   const [productConc, setProductConc] = useState('');
+  // Fichas personalizadas por especialidad
+  const [customFormsCache, setCustomFormsCache] = useState({}); // specialtyId -> [{id,name,fields,isDefault,isActive}]
+  const [selectedCustomFormIdByAppt, setSelectedCustomFormIdByAppt] = useState({}); // appointmentId -> formId
+  const [customFormValuesByAppt, setCustomFormValuesByAppt] = useState({}); // appointmentId -> { fieldName: value }
+  const [loadingCustomForms, setLoadingCustomForms] = useState(false);
   const [selectedPackageId, setSelectedPackageId] = useState('');
   // RIPS Detalles por atención
   const [ripsDetailsByAppt, setRipsDetailsByAppt] = useState({}); // appointmentId -> form
@@ -1239,11 +1244,230 @@ const PatientFicha = () => {
                 </div>
                 <div className="mt-1 text-sm text-gray-700">
                   <div><span className="text-gray-500">Recurso:</span> <span className="text-gray-800">{appointmentDetails[viewingAttentionId]?.resource || 'Sin asignar'}</span></div>
+                  <div><span className="text-gray-500">Especialidad:</span> <span className="text-blue-600 font-medium">{appointmentDetails[viewingAttentionId]?.specialty_name || attentions.find(a=>a.id===viewingAttentionId)?.specialty || '—'}</span></div>
                   <div><span className="text-gray-500">Sucursal:</span> <span className="text-blue-600 font-medium">IPS ROGANS SAS</span></div>
                   <div><span className="text-gray-500">Convenio:</span> <span className="text-blue-600 font-medium">{patient.agreement || 'Sin convenio'}</span></div>
                   <div><span className="text-gray-500">Tipo de paciente:</span> <span className="text-blue-600 font-medium">{patient.patient_type ? formatTitleCase(patient.patient_type) : 'Particular'}</span></div>
                 </div>
+
               </div>
+            </div>
+          </div>
+
+          {/* Caja de Fichas Personalizadas por Especialidad - fuera de la primera tarjeta */}
+          <div className="card">
+            <div className="flex items-start justify-between">
+              <h3 className="text-base font-medium text-gray-900">Fichas personalizadas</h3>
+              {loadingCustomForms && (
+                <span className="text-xs text-gray-500">Cargando...</span>
+              )}
+            </div>
+            <div className="mt-3 space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="form-label">Seleccionar ficha</label>
+                  <select
+                    className="input-field"
+                    value={selectedCustomFormIdByAppt[viewingAttentionId] || ''}
+                    onChange={(e)=>{
+                      const formId = e.target.value ? parseInt(e.target.value) : '';
+                      setSelectedCustomFormIdByAppt(prev => ({ ...prev, [viewingAttentionId]: formId }));
+                    }}
+                    onFocus={async ()=>{
+                      const appt = attentions.find(a=>a.id===viewingAttentionId);
+                      await ensureSpecialtiesLoaded();
+                      let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                      if (!specId) {
+                        const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                        const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                        specId = spec?.id || null;
+                      }
+                      if (!specId) return;
+                      const cacheKey = String(specId);
+                      if (!customFormsCache[cacheKey]) {
+                        try {
+                          setLoadingCustomForms(true);
+                          const resp = await specialtiesAPI.getTemplates(specId, 'customForms');
+                          const forms = (resp.data?.templates || []).map(t => ({ id: t.id, name: t.name, fields: t.content || [], isDefault: !!t.is_default, isActive: !!t.is_active }));
+                          setCustomFormsCache(prev => ({ ...prev, [cacheKey]: forms }));
+                          if (forms.length && !selectedCustomFormIdByAppt[viewingAttentionId]) {
+                            const def = forms.find(f=>f.isDefault) || forms[0];
+                            setSelectedCustomFormIdByAppt(prev => ({ ...prev, [viewingAttentionId]: def.id }));
+                          }
+                        } catch (e) {
+                          console.error('Error cargando fichas personalizadas:', e);
+                          toast.error('No se pudieron cargar las fichas personalizadas');
+                        } finally {
+                          setLoadingCustomForms(false);
+                        }
+                      }
+                    }}
+                  >
+                    <option value="">Seleccionar ficha</option>
+                    {(() => {
+                      const appt = attentions.find(a=>a.id===viewingAttentionId);
+                      let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                      if (!specId) {
+                        const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                        const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                        specId = spec?.id || null;
+                      }
+                      const forms = customFormsCache[String(specId)] || [];
+                      return forms.map(f => (
+                      <option key={f.id} value={f.id}>{f.name}</option>
+                      ));
+                    })()}
+                  </select>
+                </div>
+                <div className="md:col-span-2 flex items-end justify-end">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={async ()=>{
+                      try {
+                        const appt = attentions.find(a=>a.id===viewingAttentionId);
+                        await ensureSpecialtiesLoaded();
+                        let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                        if (!specId) {
+                          const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                          const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                          specId = spec?.id || null;
+                        }
+                        const formId = selectedCustomFormIdByAppt[viewingAttentionId];
+                        if (!formId) {
+                          toast.error('Selecciona una ficha para guardar');
+                          return;
+                        }
+                        const values = customFormValuesByAppt[viewingAttentionId] || {};
+                        const payload = { specialtyId: specId, formId, values };
+                        // Guardar ficha en endpoint dedicado
+                        const saveResp = await fetch(`/api/appointments/${viewingAttentionId}/custom-forms`, {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('authToken')||''}` },
+                          body: JSON.stringify(payload)
+                        });
+                        if (!saveResp.ok) {
+                          let err = {};
+                          try { err = await saveResp.json(); } catch {}
+                          throw new Error(err.message || err.error || 'No se pudo guardar la ficha');
+                        }
+                        toast.success('Ficha personalizada guardada');
+                      } catch (e) {
+                        console.error('Error guardando ficha personalizada:', e);
+                        toast.error(e?.message || 'Error al guardar la ficha');
+                      }
+                    }}
+                  >
+                    Guardar ficha
+                  </button>
+                </div>
+              </div>
+
+              {/* Render dinámico de campos */}
+              {(() => {
+                const appt = attentions.find(a=>a.id===viewingAttentionId);
+                let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                if (!specId) {
+                  const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                  const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                  specId = spec?.id || null;
+                }
+                const forms = customFormsCache[String(specId)] || [];
+                const selectedId = selectedCustomFormIdByAppt[viewingAttentionId];
+                const form = forms.find(f => f.id === selectedId);
+                if (!form) return null;
+                const values = customFormValuesByAppt[viewingAttentionId] || {};
+                const updateValue = (name, value) => {
+                  setCustomFormValuesByAppt(prev => ({
+                    ...prev,
+                    [viewingAttentionId]: {
+                      ...(prev[viewingAttentionId] || {}),
+                      [name]: value
+                    }
+                  }));
+                };
+
+                return (
+                  <div className="space-y-3">
+                    {form.fields.length === 0 && (
+                      <div className="text-sm text-gray-500">Esta ficha no tiene campos configurados.</div>
+                    )}
+                    {form.fields.map(field => (
+                      <div key={field.name} className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="form-label">{field.label || field.name}{field.required ? ' *' : ''}</label>
+                          {field.type === 'textarea' ? (
+                            <textarea
+                              className="input-field"
+                              rows="3"
+                              value={values[field.name] || ''}
+                              onChange={(e)=>updateValue(field.name, e.target.value)}
+                              required={!!field.required}
+                            />
+                          ) : field.type === 'select' ? (
+                            <select
+                              className="input-field"
+                              value={values[field.name] || ''}
+                              onChange={(e)=>updateValue(field.name, e.target.value)}
+                              required={!!field.required}
+                            >
+                              <option value="">Seleccionar</option>
+                              {(field.options || []).map(opt => (
+                                <option key={String(opt)} value={opt}>{opt}</option>
+                              ))}
+                            </select>
+                          ) : field.type === 'select-multiple' ? (
+                            <select
+                              multiple
+                              className="input-field"
+                              value={values[field.name] || []}
+                              onChange={(e)=>{
+                                const opts = Array.from(e.target.selectedOptions).map(o=>o.value);
+                                updateValue(field.name, opts);
+                              }}
+                            >
+                              {(field.options || []).map(opt => (
+                                <option key={String(opt)} value={opt}>{opt}</option>
+                              ))}
+                            </select>
+                          ) : field.type === 'radio' ? (
+                            <div className="space-y-2">
+                              {(field.options || []).map(opt => (
+                                <label key={String(opt)} className="flex items-center space-x-2">
+                                  <input
+                                    type="radio"
+                                    name={`cf_${viewingAttentionId}_${field.name}`}
+                                    value={opt}
+                                    checked={(values[field.name] || '') === opt}
+                                    onChange={(e)=>updateValue(field.name, opt)}
+                                    className="rounded border-gray-300"
+                                  />
+                                  <span className="text-sm">{opt}</span>
+                                </label>
+                              ))}
+                            </div>
+                          ) : field.type === 'checkbox' ? (
+                            <input
+                              type="checkbox"
+                              className="input-field"
+                              checked={!!values[field.name]}
+                              onChange={(e)=>updateValue(field.name, e.target.checked)}
+                            />
+                          ) : (
+                            <input
+                              type={field.type || 'text'}
+                              className="input-field"
+                              value={values[field.name] || ''}
+                              onChange={(e)=>updateValue(field.name, e.target.value)}
+                              required={!!field.required}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           </div>
 

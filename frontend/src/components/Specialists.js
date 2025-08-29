@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
+import { usersAPI, specialtiesAPI } from '../config/api';
 
 const Specialists = () => {
   const [specialists, setSpecialists] = useState([]);
@@ -32,6 +33,49 @@ const Specialists = () => {
     confirmPassword: '',
     role: 'medical_user'
   });
+
+  // Cargar especialidades y especialistas desde la API
+  useEffect(() => {
+    const loadInitialData = async () => {
+      try {
+        setLoading(true);
+        // Cargar especialidades (si falla, dejar las por defecto)
+        try {
+          const { data } = await specialtiesAPI.getAll();
+          if (Array.isArray(data?.specialties)) {
+            setSpecialties(data.specialties);
+          }
+        } catch (_) {}
+
+        // Cargar especialistas (doctores)
+        try {
+          const { data } = await usersAPI.getDoctors();
+          const doctors = Array.isArray(data?.doctors) ? data.doctors : [];
+          const mapped = doctors.map(d => ({
+            id: d.id,
+            firstName: d.first_name,
+            lastName: d.last_name,
+            title: 'Dr',
+            username: d.email,
+            identificationType: 'CC',
+            identificationNumber: '',
+            email: d.email,
+            phone: '',
+            specialties: d.specialty_id ? [{ id: d.specialty_id, name: d.specialty_name || '' }] : [],
+            isActive: d.is_active,
+            role: 'medical_user'
+          }));
+          setSpecialists(mapped);
+        } catch (error) {
+          console.error('Error cargando doctores:', error);
+          toast.error('No se pudieron cargar los especialistas');
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadInitialData();
+  }, []);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -70,38 +114,73 @@ const Specialists = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     
-    if (formData.password !== formData.confirmPassword) {
-      toast.error('Las contraseñas no coinciden');
-      return;
-    }
-
-    if (formData.specialties.length === 0) {
+    if (!formData.specialties || formData.specialties.length === 0) {
       toast.error('Debe seleccionar al menos una especialidad');
       return;
     }
 
     try {
       if (editingSpecialist) {
-        // Simular actualización
-        const updatedSpecialists = specialists.map(s => 
-          s.id === editingSpecialist.id 
-            ? { ...s, ...formData, id: s.id }
-            : s
-        );
-        setSpecialists(updatedSpecialists);
-        toast.success('Especialista actualizado exitosamente');
-      } else {
-        // Simular creación
-        const newSpecialist = {
-          ...formData,
-          id: Date.now(),
-          isActive: true,
-          specialties: formData.specialties.map(id => 
-            specialties.find(s => s.id === id)
-          ).filter(Boolean)
+        // Actualizar en BD
+        const primarySpecialtyId = formData.specialties[0];
+        const payload = {
+          firstName: formData.firstName,
+          lastName: formData.lastName,
+          role: 'medical_user',
+          specialtyId: primarySpecialtyId || null,
+          isActive: typeof editingSpecialist.isActive === 'boolean' ? editingSpecialist.isActive : true
         };
-        setSpecialists([...specialists, newSpecialist]);
-        toast.success('Especialista creado exitosamente');
+        const { data } = await usersAPI.update(editingSpecialist.id, payload);
+        const u = data?.user;
+        const updated = {
+          id: u.id,
+          firstName: u.first_name,
+          lastName: u.last_name,
+          title: formData.title || 'Dr',
+          username: u.email,
+          identificationType: editingSpecialist.identificationType || 'CC',
+          identificationNumber: editingSpecialist.identificationNumber || '',
+          email: u.email,
+          phone: editingSpecialist.phone || '',
+          specialties: u.specialty_id ? [{ id: u.specialty_id, name: u.specialty_name || '' }] : [],
+          isActive: u.is_active,
+          role: 'medical_user'
+        };
+        setSpecialists(prev => prev.map(s => (s.id === updated.id ? updated : s)));
+        toast.success('Especialista actualizado en la base de datos');
+      } else {
+        // Crear en BD
+        const primarySpecialtyId = formData.specialties[0];
+        const payload = {
+          email: formData.email,
+          firstName: formData.firstName,
+          lastName: formData.lastName,
+          role: 'medical_user',
+          specialtyId: primarySpecialtyId || null,
+          isActive: true
+        };
+        const { data } = await usersAPI.create(payload);
+        const u = data?.user;
+        const created = {
+          id: u.id,
+          firstName: u.first_name,
+          lastName: u.last_name,
+          title: formData.title || 'Dr',
+          username: u.email,
+          identificationType: formData.identificationType || 'CC',
+          identificationNumber: formData.identificationNumber || '',
+          email: u.email,
+          phone: formData.phone || '',
+          specialties: u.specialty_id ? [{ id: u.specialty_id, name: u.specialty_name || '' }] : [],
+          isActive: u.is_active,
+          role: 'medical_user'
+        };
+        setSpecialists(prev => [...prev, created]);
+        if (u.tempPassword) {
+          toast.success(`Especialista creado. Contraseña temporal: ${u.tempPassword}`);
+        } else {
+          toast.success('Especialista creado en la base de datos');
+        }
       }
       
       setShowForm(false);
@@ -109,7 +188,8 @@ const Specialists = () => {
       resetForm();
     } catch (error) {
       console.error('Error saving specialist:', error);
-      toast.error('Error al guardar especialista');
+      const msg = error?.response?.data?.message || 'Error al guardar especialista';
+      toast.error(msg);
     }
   };
 
@@ -154,18 +234,26 @@ const Specialists = () => {
   const handleDelete = async (id) => {
     if (window.confirm('¿Está seguro de eliminar este especialista?')) {
       try {
+        await usersAPI.delete(id);
         setSpecialists(specialists.filter(s => s.id !== id));
-        toast.success('Especialista eliminado exitosamente');
+        toast.success('Especialista eliminado');
       } catch (error) {
         console.error('Error deleting specialist:', error);
-        toast.error('Error al eliminar especialista');
+        const msg = error?.response?.data?.message || 'Error al eliminar especialista';
+        toast.error(msg);
       }
     }
   };
 
   const handleResetPassword = async (id) => {
     try {
-      toast.success('Contraseña restablecida exitosamente');
+      const { data } = await usersAPI.resetPassword(id);
+      const temp = data?.tempPassword;
+      if (temp) {
+        toast.success(`Contraseña temporal: ${temp}`);
+      } else {
+        toast.success('Contraseña restablecida exitosamente');
+      }
     } catch (error) {
       console.error('Error resetting password:', error);
       toast.error('Error al restablecer contraseña');

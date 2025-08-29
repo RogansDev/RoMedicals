@@ -1,6 +1,6 @@
 // Constantes de configuración de la API
 export const API_CONFIG = {
-  BASE_URL: 'http://localhost:3001/api',
+  BASE_URL: '/api',
   TIMEOUT: 10000,
   ENDPOINTS: {
     AUTH: {

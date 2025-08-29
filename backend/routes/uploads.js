@@ -14,11 +14,11 @@ const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB máximo
+    fileSize: 50 * 1024 * 1024, // 50MB máximo
   },
   fileFilter: (req, file, cb) => {
     // Verificar tipos de archivo permitidos
-    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx/;
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|mp4|webm|ogg/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
 
@@ -66,6 +66,17 @@ const saveDocument = async (buffer, filename) => {
   return `/uploads/documents/${filename}`;
 };
 
+// Función para guardar media (video/audio)
+const saveMedia = async (buffer, filename) => {
+  const uploadDir = path.join(__dirname, '../uploads/media');
+  await ensureUploadDir(uploadDir);
+
+  const filePath = path.join(uploadDir, filename);
+  await fs.writeFile(filePath, buffer);
+
+  return `/uploads/media/${filename}`;
+};
+
 // POST /api/uploads/image - Subir imagen
 router.post('/image', authenticateToken, upload.single('image'), async (req, res) => {
   try {
@@ -76,11 +87,10 @@ router.post('/image', authenticateToken, upload.single('image'), async (req, res
       });
     }
 
-    const { patientId, type = 'general' } = req.body;
+    const { patientId, appointmentId, type = 'general' } = req.body;
     
-    // Generar nombre único para el archivo
-    const fileExtension = path.extname(req.file.originalname);
-    const filename = `${uuidv4()}${fileExtension}`;
+    // Generar nombre único para el archivo (convertimos a JPG)
+    const filename = `${uuidv4()}.jpg`;
     
     // Procesar y guardar imagen
     const imagePath = await processAndSaveImage(req.file.buffer, filename);
@@ -89,8 +99,8 @@ router.post('/image', authenticateToken, upload.single('image'), async (req, res
     const uploadResult = await query(
       `INSERT INTO uploads (
         filename, original_name, file_path, file_type, file_size,
-        patient_id, uploaded_by, upload_type, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        patient_id, uploaded_by, upload_type, appointment_id, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
       RETURNING *`,
       [
         filename,
@@ -100,7 +110,8 @@ router.post('/image', authenticateToken, upload.single('image'), async (req, res
         req.file.size,
         patientId || null,
         req.user.id,
-        type
+        type,
+        appointmentId ? parseInt(appointmentId) : null
       ]
     );
 
@@ -116,6 +127,7 @@ router.post('/image', authenticateToken, upload.single('image'), async (req, res
         fileType: uploadRecord.file_type,
         fileSize: uploadRecord.file_size,
         uploadType: uploadRecord.upload_type,
+        appointmentId: uploadRecord.appointment_id,
         createdAt: uploadRecord.created_at
       }
     });
@@ -139,10 +151,10 @@ router.post('/document', authenticateToken, upload.single('document'), async (re
       });
     }
 
-    const { patientId, type = 'general' } = req.body;
+    const { patientId, appointmentId, type = 'general' } = req.body;
     
-    // Generar nombre único para el archivo
-    const fileExtension = path.extname(req.file.originalname);
+    // Generar nombre único para el archivo manteniendo extensión original
+    const fileExtension = path.extname(req.file.originalname) || '.bin';
     const filename = `${uuidv4()}${fileExtension}`;
     
     // Guardar documento
@@ -152,8 +164,8 @@ router.post('/document', authenticateToken, upload.single('document'), async (re
     const uploadResult = await query(
       `INSERT INTO uploads (
         filename, original_name, file_path, file_type, file_size,
-        patient_id, uploaded_by, upload_type, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        patient_id, uploaded_by, upload_type, appointment_id, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
       RETURNING *`,
       [
         filename,
@@ -163,7 +175,8 @@ router.post('/document', authenticateToken, upload.single('document'), async (re
         req.file.size,
         patientId || null,
         req.user.id,
-        type
+        type,
+        appointmentId ? parseInt(appointmentId) : null
       ]
     );
 
@@ -179,6 +192,7 @@ router.post('/document', authenticateToken, upload.single('document'), async (re
         fileType: uploadRecord.file_type,
         fileSize: uploadRecord.file_size,
         uploadType: uploadRecord.upload_type,
+        appointmentId: uploadRecord.appointment_id,
         createdAt: uploadRecord.created_at
       }
     });
@@ -202,20 +216,25 @@ router.post('/multiple', authenticateToken, upload.array('files', 10), async (re
       });
     }
 
-    const { patientId, type = 'general' } = req.body;
+    const { patientId, appointmentId, type = 'general' } = req.body;
     const uploads = [];
 
     for (const file of req.files) {
       try {
-        const fileExtension = path.extname(file.originalname);
-        const filename = `${uuidv4()}${fileExtension}`;
+        let filename;
+        const originalExt = path.extname(file.originalname) || '';
         
         let filePath;
         
-        // Determinar si es imagen o documento
+        // Determinar si es imagen, video u otro documento
         if (file.mimetype.startsWith('image/')) {
+          filename = `${uuidv4()}.jpg`;
           filePath = await processAndSaveImage(file.buffer, filename);
+        } else if (file.mimetype.startsWith('video/')) {
+          filename = `${uuidv4()}${originalExt || '.mp4'}`;
+          filePath = await saveMedia(file.buffer, filename);
         } else {
+          filename = `${uuidv4()}${originalExt || '.bin'}`;
           filePath = await saveDocument(file.buffer, filename);
         }
         
@@ -223,8 +242,8 @@ router.post('/multiple', authenticateToken, upload.array('files', 10), async (re
         const uploadResult = await query(
           `INSERT INTO uploads (
             filename, original_name, file_path, file_type, file_size,
-            patient_id, uploaded_by, upload_type, created_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            patient_id, uploaded_by, upload_type, appointment_id, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
           RETURNING *`,
           [
             filename,
@@ -234,7 +253,8 @@ router.post('/multiple', authenticateToken, upload.array('files', 10), async (re
             file.size,
             patientId || null,
             req.user.id,
-            type
+            type,
+            appointmentId ? parseInt(appointmentId) : null
           ]
         );
 
@@ -246,6 +266,7 @@ router.post('/multiple', authenticateToken, upload.array('files', 10), async (re
           fileType: uploadResult.rows[0].file_type,
           fileSize: uploadResult.rows[0].file_size,
           uploadType: uploadResult.rows[0].upload_type,
+          appointmentId: uploadResult.rows[0].appointment_id,
           createdAt: uploadResult.rows[0].created_at
         });
       } catch (error) {
@@ -542,6 +563,74 @@ router.get('/patient/:patientId', authenticateToken, requirePermission('PATIENTS
     res.status(500).json({
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al obtener los uploads del paciente'
+    });
+  }
+});
+
+// GET /api/uploads/appointment/:appointmentId - Obtener uploads por atención
+router.get('/appointment/:appointmentId', authenticateToken, requirePermission('PATIENTS', 'READ'), async (req, res) => {
+  try {
+    const { appointmentId } = req.params;
+    const { page = 1, limit = 20, type = '' } = req.query;
+
+    const offset = (page - 1) * limit;
+
+    let whereConditions = [`u.appointment_id = $1`];
+    let queryParams = [parseInt(appointmentId)];
+    let paramIndex = 2;
+
+    if (type) {
+      whereConditions.push(`u.file_type LIKE $${paramIndex}`);
+      queryParams.push(`%${type}%`);
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    const countQuery = `SELECT COUNT(*) as total FROM uploads u WHERE ${whereClause}`;
+    const countResult = await query(countQuery, queryParams);
+    const total = parseInt(countResult.rows[0].total);
+
+    const mainQuery = `
+      SELECT 
+        u.id,
+        u.filename,
+        u.original_name,
+        u.file_path,
+        u.file_type,
+        u.file_size,
+        u.upload_type,
+        u.created_at,
+        usr.first_name as user_first_name,
+        usr.last_name as user_last_name
+      FROM uploads u
+      JOIN users usr ON u.uploaded_by = usr.id
+      WHERE ${whereClause}
+      ORDER BY u.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+    queryParams.push(parseInt(limit), offset);
+    const uploadsResult = await query(mainQuery, queryParams);
+
+    const uploads = uploadsResult.rows.map(upload => ({
+      ...upload,
+      userFullName: `${upload.user_first_name} ${upload.user_last_name}`
+    }));
+
+    res.json({
+      uploads,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Error obteniendo uploads de la atención:', error);
+    res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'Ocurrió un error al obtener los uploads de la atención'
     });
   }
 });

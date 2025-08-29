@@ -38,9 +38,14 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
+      imgSrc: ["'self'", "data:", "https:", "http:"],
+      mediaSrc: ["'self'", "data:", "https:", "http:"],
+      connectSrc: ["'self'", "http:", "https:"],
     },
   },
+  // Permitir embebido de recursos desde otro origen (thumbnails desde :3001)
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  crossOriginEmbedderPolicy: false,
 }));
 
 // Middleware
@@ -64,6 +69,10 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Servir archivos estáticos subidos
+app.use('/uploads', express.static(require('path').join(__dirname, 'uploads')));
+app.use('/api/uploads', express.static(require('path').join(__dirname, 'uploads')));
 
 // Middleware de logging
 app.use((req, res, next) => {
