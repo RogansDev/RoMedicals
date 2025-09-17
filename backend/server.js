@@ -96,7 +96,9 @@ app.use('/api/consents', require('./routes/consents'));
 app.use('/api/specialties', require('./routes/specialties'));
 app.use('/api/diagnoses', require('./routes/diagnoses'));
 app.use('/api/rips', require('./routes/rips'));
+app.use('/api/cie-docs', require('./routes/cie-docs'));
 app.use('/api/uploads', require('./routes/uploads'));
+app.use('/api/ai', require('./routes/ai'));
 
 // Ruta de salud
 app.get('/api/health', (req, res) => {

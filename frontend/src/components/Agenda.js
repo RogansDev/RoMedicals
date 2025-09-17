@@ -273,18 +273,37 @@ const Agenda = () => {
 
   const handleSaveAppointment = async (newAppointment) => {
     try {
-      // Crear la cita en el backend
-      const response = await appointmentService.createAppointment({
+      // Validaciones defensivas antes de enviar
+      if (!newAppointment || !newAppointment.patientId) {
+        toast.error('Debes seleccionar un paciente válido');
+        return;
+      }
+      if (!newAppointment.doctorId) {
+        toast.error('Debes seleccionar un doctor válido');
+        return;
+      }
+      const apptDate = newAppointment.appointmentDate || newAppointment.date;
+      const apptTime = newAppointment.appointmentTime || newAppointment.time;
+      if (!apptDate) { toast.error('Debes seleccionar una fecha válida'); return; }
+      if (!apptTime) { toast.error('Debes seleccionar una hora válida'); return; }
+
+      const payload = {
         patientId: newAppointment.patientId,
         doctorId: newAppointment.doctorId,
-        appointmentDate: newAppointment.date,
-        appointmentTime: newAppointment.time,
+        specialtyId: newAppointment.specialtyId || undefined,
+        appointmentDate: apptDate,
+        appointmentTime: apptTime,
         duration: 30, // Duración por defecto en minutos
-        type: newAppointment.type.toUpperCase(),
-        status: newAppointment.status.toUpperCase(),
+        type: String(newAppointment.type || '').toUpperCase(),
+        status: String(newAppointment.status || '').toUpperCase(),
         reason: newAppointment.notes || '',
         notes: newAppointment.notes || ''
-      });
+      };
+
+      try { console.debug('Creando cita con payload:', payload); } catch (_) {}
+
+      // Crear la cita en el backend
+      const response = await appointmentService.createAppointment(payload);
 
       // Recargar las citas desde el backend para asegurar consistencia
       await loadAppointments();

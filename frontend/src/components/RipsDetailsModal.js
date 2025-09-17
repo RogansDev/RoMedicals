@@ -19,12 +19,87 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
   });
 
   const panelRef = useRef(null);
+  const [cie10Options, setCie10Options] = useState([]);
+  const [cie10Loading, setCie10Loading] = useState(false);
+  const [cie10Error, setCie10Error] = useState('');
+  const [secondaryCodes, setSecondaryCodes] = useState([]);
+  const [secondarySelect, setSecondarySelect] = useState('');
 
   useEffect(() => {
     if (isOpen && initialValues) {
       setForm(prev => ({ ...prev, ...initialValues }));
+      const sec = [
+        initialValues.diagnosticoSecundario1 || '',
+        initialValues.diagnosticoSecundario2 || '',
+        initialValues.diagnosticoSecundario3 || ''
+      ].filter(Boolean);
+      // Unicos y válidos
+      const uniq = Array.from(new Set(sec));
+      setSecondaryCodes(uniq);
+      setSecondarySelect('');
     }
   }, [isOpen, initialValues]);
+
+  useEffect(() => {
+    const parseCie10Csv = (text) => {
+      const lines = String(text || '').split(/\r?\n/);
+      const opts = [];
+      for (let i = 0; i < lines.length; i++) {
+        const raw = lines[i];
+        if (!raw) continue;
+        // CSV separado por ;. Estructura: CODE;DESCRIPCION;[vacío]
+        const parts = raw.split(';');
+        const code = String(parts[0] || '').trim();
+        const desc = String(parts[1] || '').trim();
+        if (!code || !desc) continue;
+        opts.push({ value: code, label: `${code} - ${desc}` });
+      }
+      return opts;
+    };
+
+    const tryFetch = async (urls) => {
+      for (const url of urls) {
+        try {
+          const resp = await fetch(url, { cache: 'no-store' });
+          if (resp.ok) {
+            const txt = await resp.text();
+            return txt;
+          }
+        } catch (_) {
+          // intentar siguiente URL
+        }
+      }
+      throw new Error('No se pudo cargar el archivo CIE-10');
+    };
+
+    const loadCie10 = async () => {
+      if (!isOpen) return;
+      if (cie10Options && cie10Options.length > 0) return;
+      setCie10Loading(true);
+      setCie10Error('');
+      try {
+        // Intentos: public root y posibles rutas alternativas
+        const candidateUrls = [
+          '/cie10.csv',
+          '/assets/cie10.csv',
+          '/public/cie10.csv',
+          '/frontend/utils/cie10.csv',
+          '/utils/cie10.csv'
+        ];
+        const text = await tryFetch(candidateUrls);
+        const opts = parseCie10Csv(text);
+        if (opts.length === 0) throw new Error('Archivo CIE-10 vacío o inválido');
+        setCie10Options([{ value: '', label: 'Seleccione una opción' }, ...opts]);
+      } catch (e) {
+        setCie10Error(e?.message || 'Error cargando CIE-10');
+      } finally {
+        setCie10Loading(false);
+      }
+    };
+
+    loadCie10();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -96,6 +171,24 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
     { value: 'intervencion_colectiva', label: 'Intervención colectiva' },
     { value: 'modificacion_estetica_corporal', label: 'Modificación de la estética corporal (fines estéticos)' },
     { value: 'otra', label: 'Otra' }
+  ];
+
+  const modalidadAtencionOptions = [
+    { value: '', label: 'Seleccione una opción' },
+    { value: 'telemedicina', label: 'Telemedicina' },
+    { value: 'presencial', label: 'Presencial' }
+  ];
+
+  const ambitoAtencionOptions = [
+    { value: '', label: 'Seleccione una opción' },
+    { value: 'consulta_general', label: 'Consulta general' },
+    { value: 'internacion', label: 'Internacion' }
+  ];
+
+  const tipoServicioOptions = [
+    { value: '', label: 'Seleccione una opción' },
+    { value: 'medicina_general', label: 'Medicina general' },
+    { value: 'medicina_interna', label: 'Medicina interna' }
   ];
 
   const causaExternaOptions = [
@@ -192,10 +285,33 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
       ambitoAtencion: '',
       tipoServicio: ''
     });
+    setSecondaryCodes([]);
+    setSecondarySelect('');
   };
 
   const handleSave = () => {
-    onSave && onSave(form);
+    const s1 = secondaryCodes[0] || '';
+    const s2 = secondaryCodes[1] || '';
+    const s3 = secondaryCodes[2] || '';
+    // Construir mapa código->etiqueta para que el padre pueda registrar nombres
+    const labelsMap = {};
+    const putLabel = (code) => {
+      const opt = (cie10Options || []).find(o => String(o.value) === String(code));
+      if (opt) labelsMap[code] = opt.label;
+    };
+    if (form.diagnosticoPrincipal) putLabel(form.diagnosticoPrincipal);
+    if (s1) putLabel(s1);
+    if (s2) putLabel(s2);
+    if (s3) putLabel(s3);
+
+    const payload = {
+      ...form,
+      diagnosticoSecundario1: s1,
+      diagnosticoSecundario2: s2,
+      diagnosticoSecundario3: s3,
+      _labelsMap: labelsMap
+    };
+    onSave && onSave(payload);
     onClose && onClose();
   };
 
@@ -227,13 +343,6 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600" title="Cerrar">
             <span style={{ fontSize: '20px' }}>✕</span>
           </button>
-        </div>
-
-        {/* Aviso informativo */}
-        <div className="px-6 pt-6">
-          <div className="bg-blue-50 border border-blue-200 rounded-md p-4 text-blue-800 text-sm">
-            Medilink pre llena los campos basándose en atenciones pasadas. Es responsabilidad del profesional revisar y modificarlos en caso de ser necesario.
-          </div>
         </div>
 
         {/* Formulario */}
@@ -280,33 +389,77 @@ const RipsDetailsModal = ({ isOpen, onClose, onSave, initialValues }) => {
 
           <div>
             <label className="form-label">Diagnóstico principal</label>
-            <select name="diagnosticoPrincipal" className="input-field" value={form.diagnosticoPrincipal} onChange={update}>
-              {placeholderOptions.map(o => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
+            <OverlaySelect
+              name="diagnosticoPrincipal"
+              value={form.diagnosticoPrincipal}
+              options={cie10Options.length ? cie10Options : [{ value: '', label: cie10Error ? `Error: ${cie10Error}` : 'Seleccione una opción' }]}
+              onChange={(val)=>{
+                setForm(prev=>({ ...prev, diagnosticoPrincipal: val }));
+                if (val) {
+                  setSecondaryCodes(prev => prev.filter(c => c !== val));
+                }
+              }}
+              loading={cie10Loading}
+              disabled={!!cie10Error}
+            />
           </div>
 
           <div>
             <label className="form-label">Diagnósticos secundarios</label>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <OverlaySelect name="diagnosticoSecundario1" value={form.diagnosticoSecundario1} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, diagnosticoSecundario1: val }))} />
-              <OverlaySelect name="diagnosticoSecundario2" value={form.diagnosticoSecundario2} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, diagnosticoSecundario2: val }))} />
-              <OverlaySelect name="diagnosticoSecundario3" value={form.diagnosticoSecundario3} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, diagnosticoSecundario3: val }))} />
-            </div>
+            {(() => {
+              const maxSecondary = 3;
+              const exclude = new Set([form.diagnosticoPrincipal, ...secondaryCodes].filter(Boolean));
+              const filtered = (cie10Options || []).filter(o => !o.value || !exclude.has(o.value));
+              return (
+                <div>
+                  <OverlaySelect
+                    name="diagnosticoSecundarioAdd"
+                    value={secondarySelect}
+                    options={filtered.length ? filtered : [{ value: '', label: cie10Error ? `Error: ${cie10Error}` : 'Seleccione una opción' }]}
+                    onChange={(val)=>{
+                      if (!val) return;
+                      setSecondaryCodes(prev => {
+                        if (prev.includes(val)) return prev;
+                        if (prev.length >= maxSecondary) return prev; // límite de compatibilidad
+                        return [...prev, val];
+                      });
+                      setSecondarySelect('');
+                    }}
+                    loading={cie10Loading}
+                    disabled={!!cie10Error || secondaryCodes.length >= maxSecondary}
+                  />
+                  {secondaryCodes.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {secondaryCodes.map(code => {
+                        const opt = (cie10Options || []).find(o => String(o.value) === String(code));
+                        const label = opt ? opt.label : code;
+                        return (
+                          <span key={code} className="inline-flex items-center px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-xs">
+                            <span className="mr-1">{label}</span>
+                            <button type="button" className="ml-1 text-blue-700 hover:text-blue-900" aria-label="Eliminar" onClick={()=>setSecondaryCodes(prev=>prev.filter(c=>c!==code))}>×</button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           <div>
             <label className="form-label">Modalidad de atención</label>
-            <OverlaySelect name="modalidadAtencion" value={form.modalidadAtencion} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, modalidadAtencion: val }))} />
+            <OverlaySelect name="modalidadAtencion" value={form.modalidadAtencion} options={modalidadAtencionOptions} onChange={(val)=>setForm(prev=>({ ...prev, modalidadAtencion: val }))} />
           </div>
 
           <div>
             <label className="form-label">Ámbito de atención</label>
-            <OverlaySelect name="ambitoAtencion" value={form.ambitoAtencion} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, ambitoAtencion: val }))} />
+            <OverlaySelect name="ambitoAtencion" value={form.ambitoAtencion} options={ambitoAtencionOptions} onChange={(val)=>setForm(prev=>({ ...prev, ambitoAtencion: val }))} />
           </div>
 
           <div>
             <label className="form-label">Tipo de servicio</label>
-            <OverlaySelect name="tipoServicio" value={form.tipoServicio} options={placeholderOptions} onChange={(val)=>setForm(prev=>({ ...prev, tipoServicio: val }))} />
+            <OverlaySelect name="tipoServicio" value={form.tipoServicio} options={tipoServicioOptions} onChange={(val)=>setForm(prev=>({ ...prev, tipoServicio: val }))} />
           </div>
 
           {/* Botones */}

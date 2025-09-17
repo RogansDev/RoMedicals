@@ -337,6 +337,8 @@ router.get('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'READ'),
 // POST /api/appointments - Crear nueva cita
 router.post('/', authenticateToken, requirePermission('APPOINTMENTS', 'CREATE'), async (req, res) => {
   try {
+    // Depuración: ver payload recibido
+    try { console.debug('POST /api/appointments body:', req.body); } catch (_) {}
     // Validar datos de entrada
     const { error, value } = appointmentCreateSchema.validate(req.body);
     if (error) {

@@ -11,7 +11,7 @@ const isLocalHost = (function() {
 
 window.ROMEDICALS_CONFIG = {
   API: {
-    BASE_URL: isLocalHost ? 'http://localhost:3001/api' : '/api',
+    BASE_URL: isLocalHost ? 'http://148.230.90.103:3001/api' : '/api',
     TIMEOUT: 10000,
     ENDPOINTS: {
       AUTH: {

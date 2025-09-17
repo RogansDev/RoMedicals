@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import patientService from '../services/patientService';
 import userService from '../services/userService';
+import { specialtiesAPI, usersAPI } from '../config/api';
 
 const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   const [formData, setFormData] = useState({
@@ -30,6 +31,7 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   useEffect(() => {
     if (isOpen) {
       loadDoctors();
+      loadSpecialties();
       // Establecer fecha por defecto como hoy
       const today = new Date();
       const formattedDate = today.toISOString().split('T')[0];
@@ -39,8 +41,16 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
 
   const loadDoctors = async () => {
     try {
-      const response = await userService.getDoctors();
-      const doctorsList = response.users || response.doctors || [];
+      // Preferir endpoint oficial de usuarios (axios) para doctores
+      let doctorsList = [];
+      try {
+        const { data } = await usersAPI.getDoctors();
+        doctorsList = Array.isArray(data?.doctors) ? data.doctors : (Array.isArray(data) ? data : []);
+      } catch (_) {
+        // Fallback al servicio legacy si el endpoint anterior falla
+        const response = await userService.getDoctors();
+        doctorsList = response.users || response.doctors || [];
+      }
       setDoctors(doctorsList);
       
       // Extraer especialidades únicas (id, name)
@@ -50,7 +60,9 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
         const name = d.specialty_name || d.specialty || '';
         if (id && name && !specialtyMap.has(id)) specialtyMap.set(id, name);
       });
-      setSpecialties(Array.from(specialtyMap.entries()).map(([id, name]) => ({ id, name })));
+      if (specialties.length === 0) {
+        setSpecialties(Array.from(specialtyMap.entries()).map(([id, name]) => ({ id, name })));
+      }
     } catch (error) {
       console.error('Error cargando doctores:', error);
       // Usar datos mock como fallback
@@ -60,14 +72,28 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
         { id: 3, name: 'Dr. Laura Martínez', specialty: 'Dermatología' },
         { id: 4, name: 'Dr. Pedro Silva', specialty: 'Pediatría' }
       ]);
-      setSpecialties([
-        { id: 1, name: 'Medicina General' },
-        { id: 2, name: 'Cardiología' },
-        { id: 3, name: 'Dermatología' },
-        { id: 4, name: 'Pediatría' }
-      ]);
+      if (specialties.length === 0) {
+        setSpecialties([
+          { id: 1, name: 'Medicina General' },
+          { id: 2, name: 'Cardiología' },
+          { id: 3, name: 'Dermatología' },
+          { id: 4, name: 'Pediatría' }
+        ]);
+      }
     }
   }
+
+  const loadSpecialties = async () => {
+    try {
+      const resp = await specialtiesAPI.getAll();
+      const list = (resp.data?.specialties || resp.data || resp.specialties || [])
+        .map(s => ({ id: s.id, name: s.name }));
+      if (list.length) setSpecialties(list);
+    } catch (error) {
+      // Silencioso: se usará fallback desde doctores
+      console.warn('No se pudieron cargar especialidades desde API, usando fallback');
+    }
+  };
 
   const appointmentTypes = [
     { value: 'primera vez', label: 'Primera vez' },
@@ -115,29 +141,28 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
       const response = await patientService.getPatients({ search: searchTerm });
       const patients = response.patients || [];
       
-      // Convertir al formato esperado por el modal
-      const formattedPatients = patients.map(patient => ({
-        id: patient.id,
-        name: `${patient.first_name} ${patient.last_name}`,
-        document: `${patient.identification_type || 'CC'} ${patient.identification_number || ''}`,
-        phone: patient.mobile_phone || patient.landline_phone || 'Sin teléfono'
-      }));
+      // Convertir al formato esperado por el modal (robusto ante variantes de backend)
+      const formattedPatients = patients.map(patient => {
+        const id = patient.id ?? patient.patient_id ?? patient.patientId ?? patient.uid ?? patient.uuid ?? '';
+        const firstName = patient.first_name ?? patient.firstName ?? '';
+        const lastName = patient.last_name ?? patient.lastName ?? '';
+        const name = (patient.name ?? patient.full_name ?? `${firstName} ${lastName}`.trim()) || 'Sin nombre';
+        const idType = patient.identification_type ?? patient.document_type ?? patient.documentType ?? 'CC';
+        const idNumber = patient.identification_number ?? patient.document_number ?? patient.documentNumber ?? '';
+        const phone = patient.mobile_phone ?? patient.cellphone ?? patient.phone ?? patient.landline_phone ?? 'Sin teléfono';
+        return {
+          id,
+          name,
+          document: `${idType} ${idNumber}`.trim(),
+          phone
+        };
+      });
       
       setPatientSearchResults(formattedPatients);
     } catch (error) {
       console.error('Error buscando pacientes:', error);
-      // En caso de error, usar datos mock como fallback
-      const mockPatients = [
-        { id: 1, name: 'Juan Carlos Pérez', document: 'CC 12345678', phone: '+57 300 123 4567' },
-        { id: 2, name: 'María González', document: 'CC 87654321', phone: '+57 301 987 6543' },
-        { id: 3, name: 'Pedro Silva', document: 'CC 11223344', phone: '+57 302 555 1234' },
-        { id: 4, name: 'Ana Rodríguez', document: 'CC 55667788', phone: '+57 303 444 5555' }
-      ].filter(patient => 
-        patient.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        patient.document.includes(searchTerm)
-      );
-      
-      setPatientSearchResults(mockPatients);
+      toast.error('No se pudo buscar pacientes. Intenta de nuevo o crea el paciente primero.');
+      setPatientSearchResults([]);
     } finally {
       setSearchingPatient(false);
     }
@@ -155,33 +180,54 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   };
 
   const handleDoctorChange = (e) => {
-    const doctorId = parseInt(e.target.value);
-    const selectedDoctor = doctors.find(d => d.id === doctorId);
-    
+    const doctorId = e.target.value;
+    const selectedDoctor = doctors.find(d => String(d.id) === String(doctorId));
+    const selSpecId = selectedDoctor ? (selectedDoctor.specialty_id || selectedDoctor.specialtyId || '') : '';
+    const selSpecName = selectedDoctor ? (selectedDoctor.specialty || selectedDoctor.specialty_name || '') : '';
+
+    // Asegurar que la especialidad del médico esté presente en el selector
+    if (selSpecId && selSpecName && !specialties.find(s => String(s.id) === String(selSpecId))) {
+      setSpecialties(prev => ([...prev, { id: selSpecId, name: selSpecName }]));
+    }
+
     setFormData(prev => ({
       ...prev,
       doctorId: doctorId,
-      doctorName: selectedDoctor ? (selectedDoctor.name || `${selectedDoctor.first_name} ${selectedDoctor.last_name}`) : '',
-      specialty: selectedDoctor ? (selectedDoctor.specialty || selectedDoctor.specialty_name || '') : '',
-      specialtyId: selectedDoctor ? (selectedDoctor.specialty_id || selectedDoctor.specialtyId || '') : ''
+      doctorName: selectedDoctor ? (selectedDoctor.name || `${selectedDoctor.first_name || ''} ${selectedDoctor.last_name || ''}`.trim()) : '',
+      specialty: selSpecName || '',
+      specialtyId: selSpecId || ''
+    }));
+  };
+
+  const handleSpecialtyChange = (e) => {
+    const selectedId = e.target.value || '';
+    const selectedSpec = specialties.find(s => String(s.id) === String(selectedId));
+    // Si el médico seleccionado no pertenece a la especialidad escogida, NO limpiar de inmediato; permitir que el usuario cambie luego
+    setFormData(prev => ({
+      ...prev,
+      specialtyId: selectedId,
+      specialty: selectedSpec ? selectedSpec.name : '',
     }));
   };
 
   const validateForm = () => {
-    const required = ['patientName', 'doctorName', 'date', 'time', 'patientPhone', 'type', 'status', 'specialtyId'];
-    const missing = required.filter(field => !formData[field]);
-    
-    if (missing.length > 0) {
-      toast.error('Por favor completa todos los campos obligatorios');
-      return false;
-    }
-    
-    // Validar que documento esté completo
-    if (!formData.patientDocument) {
+    // Normalizar valores en memoria antes de validar
+    const patientIdOk = formData.patientId !== undefined && formData.patientId !== null && String(formData.patientId).trim() !== '';
+    const doctorIdOk = formData.doctorId !== undefined && formData.doctorId !== null && String(formData.doctorId).trim() !== '';
+    const specialtyIdOk = formData.specialtyId !== undefined && formData.specialtyId !== null && String(formData.specialtyId).trim() !== '';
+
+    if (!patientIdOk) { toast.error('Selecciona un paciente de la lista'); return false; }
+    if (!doctorIdOk) { toast.error('Selecciona un doctor'); return false; }
+    if (!specialtyIdOk) { toast.error('Selecciona una especialidad'); return false; }
+
+    const required = ['patientName', 'doctorName', 'date', 'time', 'patientPhone', 'type', 'status'];
+    const missing = required.filter(field => !formData[field] || String(formData[field]).trim() === '');
+    if (missing.length > 0) { toast.error('Por favor completa todos los campos obligatorios'); return false; }
+
+    if (!formData.patientDocument || String(formData.patientDocument).trim() === '') {
       toast.error('Por favor completa el documento del paciente');
       return false;
     }
-    
     return true;
   };
 
@@ -202,15 +248,15 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
         duration: 30, // Duración por defecto en minutos
         type: formData.type.toUpperCase(),
         status: formData.status.toUpperCase(),
-        specialtyId: formData.specialtyId ? parseInt(formData.specialtyId) : null,
+        specialtyId: formData.specialtyId || null,
         reason: formData.notes || '',
         notes: formData.notes || ''
       };
       
-      // Llamar a la función onSave del componente padre
-      onSave(appointmentData);
-      
-      toast.success('Cita creada exitosamente');
+      // Llamar a la función onSave del componente padre y esperar resultado
+      await onSave(appointmentData);
+
+      // Cierre del modal si todo salió bien (el toast de éxito lo maneja el padre)
       handleClose();
     } catch (error) {
       console.error('Error al crear la cita:', error);
@@ -229,6 +275,7 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
       doctorId: '',
       doctorName: '',
       specialty: '',
+      specialtyId: '',
       date: '',
       time: '',
       type: '',
@@ -347,6 +394,21 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
               
               <div className="space-y-4">
                 <div>
+                  <label className="form-label">Especialidad *</label>
+                  <select
+                    name="specialtyId"
+                    className="input-field"
+                    value={formData.specialtyId}
+                    onChange={handleSpecialtyChange}
+                  >
+                    <option value="">Seleccionar especialidad</option>
+                    {specialties.map(spec => (
+                      <option key={spec.id} value={spec.id}>{spec.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
                   <label className="form-label">Doctor *</label>
                   <select
                     name="doctorId"
@@ -355,9 +417,13 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
                     onChange={handleDoctorChange}
                   >
                     <option value="">Seleccionar doctor</option>
-                    {doctors.map(doctor => (
+                    {(
+                      formData.specialtyId
+                        ? doctors.filter(d => String(d.specialty_id || d.specialtyId) === String(formData.specialtyId))
+                        : doctors
+                    ).map(doctor => (
                       <option key={doctor.id} value={doctor.id}>
-                        {doctor.name} - {doctor.specialty}
+                        {(doctor.name || `${doctor.first_name} ${doctor.last_name}`)} - {(doctor.specialty || doctor.specialty_name || '')}
                       </option>
                     ))}
                   </select>

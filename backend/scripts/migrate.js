@@ -427,6 +427,23 @@ async function createDefaultData() {
     }
     console.log('✅ Diagnósticos CIE-10 de ejemplo creados');
 
+    // Crear tabla de Documentos CIE asociados a atenciones
+    await query(`
+      CREATE TABLE IF NOT EXISTS cie_documents (
+        id SERIAL PRIMARY KEY,
+        patient_id INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+        appointment_id INTEGER REFERENCES appointments(id) ON DELETE SET NULL,
+        version VARCHAR(20) NOT NULL DEFAULT 'CIE-10',
+        code VARCHAR(20) NOT NULL,
+        name VARCHAR(600) NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+      );
+    `);
+    await query("CREATE INDEX IF NOT EXISTS idx_cie_documents_patient ON cie_documents(patient_id)");
+    await query("CREATE INDEX IF NOT EXISTS idx_cie_documents_appt ON cie_documents(appointment_id)");
+    console.log('✅ Tabla cie_documents creada/verificada');
+
     console.log('🎉 Datos por defecto creados exitosamente!');
 
   } catch (error) {

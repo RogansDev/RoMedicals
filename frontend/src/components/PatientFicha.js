@@ -4,11 +4,12 @@ import toast from 'react-hot-toast';
 import patientService from '../services/patientService';
 import appointmentService from '../services/appointmentService';
 import userService from '../services/userService';
-import { specialtiesAPI, consentsAPI } from '../config/api';
+import { specialtiesAPI, consentsAPI, aiAPI, appointmentsAPI, authAPI, cieDocsAPI } from '../config/api';
 import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
 import ImagesDocsSection from './ImagesDocsSection';
 import RipsDetailsModal from './RipsDetailsModal';
+import OverlaySelect from './OverlaySelect';
 
 const PatientFicha = () => {
   const { patientId } = useParams();
@@ -64,15 +65,217 @@ const PatientFicha = () => {
   const [customFormValuesByAppt, setCustomFormValuesByAppt] = useState({}); // appointmentId -> { fieldName: value }
   const [loadingCustomForms, setLoadingCustomForms] = useState(false);
   const [selectedPackageId, setSelectedPackageId] = useState('');
+  const customFormSaveTimersRef = useRef({}); // appointmentId -> timerId
   // RIPS Detalles por atención
   const [ripsDetailsByAppt, setRipsDetailsByAppt] = useState({}); // appointmentId -> form
   const [showRipsModal, setShowRipsModal] = useState(false);
   const [ripsForAttentionId, setRipsForAttentionId] = useState(null);
+  // Documentos CIE generados por atención
+  const [cieDocsByAppt, setCieDocsByAppt] = useState({}); // appointmentId -> [{ version, code, name, createdBy, createdAt }]
+  // Resumen
+  const [showSummaryModal, setShowSummaryModal] = useState(false);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryContent, setSummaryContent] = useState('');
+  const [currentUser, setCurrentUser] = useState(null);
+
+  // Asistente de IA
+  const [showAiPanel, setShowAiPanel] = useState(false);
+  const [aiMessagesByAppt, setAiMessagesByAppt] = useState({}); // appointmentId -> [{role, content}]
+  const [aiInputByAppt, setAiInputByAppt] = useState({}); // appointmentId -> string
+  const [aiLoadingByAppt, setAiLoadingByAppt] = useState({}); // appointmentId -> boolean
+  const aiScrollRef = useRef(null);
+  const [showAiPreview, setShowAiPreview] = useState(false);
+  const [aiPreviewByAppt, setAiPreviewByAppt] = useState({}); // appointmentId -> { historyHtml, evolutionHtml, prescriptionHtml, fields }
+  const [aiPreviewIncludeByAppt, setAiPreviewIncludeByAppt] = useState({}); // appointmentId -> { history: bool, evolution: bool, prescription: bool, fields: bool }
+  const [aiPreviewEditsByAppt, setAiPreviewEditsByAppt] = useState({}); // appointmentId -> { historyHtml, evolutionHtml, prescriptionHtml }
+  // Notas del médico
+  const [showNotesPanel, setShowNotesPanel] = useState(false);
+  const [notesByAppt, setNotesByAppt] = useState({}); // appointmentId -> [{ id, content, createdAt, updatedAt }]
+  const [notesInputByAppt, setNotesInputByAppt] = useState({}); // appointmentId -> string
+  const [notesEditingByAppt, setNotesEditingByAppt] = useState({}); // appointmentId -> { id, content } | null
+  // Grabación de audio para enviar a webhook externo
+  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+  const [isPausedAudio, setIsPausedAudio] = useState(false);
+  const [showAudioMenu, setShowAudioMenu] = useState(false);
+  const [uploadingAudio, setUploadingAudio] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const lastAudioBlobRef = useRef(null);
+  const lastAudioFilenameRef = useRef('');
+  const [recordElapsedMs, setRecordElapsedMs] = useState(0);
+  const recordTimerRef = useRef(null);
+  const recordAccumMsRef = useRef(0);
+  const recordStartRef = useRef(0);
+  // Monitor de micrófono para prueba visual
+  const [micTestActive, setMicTestActive] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const micStreamRef = useRef(null);
+  const micCtxRef = useRef(null);
+  const micSrcRef = useRef(null);
+  const micAnalyserRef = useRef(null);
+  const micRAFRef = useRef(null);
+  const [micTestRemainingMs, setMicTestRemainingMs] = useState(0);
+  const micTestEndRef = useRef(0);
+  // Envío automático al detener
+  const pendingAutoSendRef = useRef(false);
+  // Estado reactivo para indicar si hay un audio listo para enviar
+  const [hasLastAudio, setHasLastAudio] = useState(false);
+  // File input para adjuntar audio
+  const attachAudioInputRef = useRef(null);
+  // Fuente del último audio: 'attached' | 'recorded'
+  const lastAudioSourceRef = useRef('');
+  // Si es true, descartar el audio grabado cuando se dispare onstop
+  const ignoreRecordedOnStopRef = useRef(false);
+
+  const formatDuration = (ms) => {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const mm = String(Math.floor(totalSec / 60)).padStart(2, '0');
+    const ss = String(totalSec % 60).padStart(2, '0');
+    return `${mm}:${ss}`;
+  };
+
+  // Normaliza etiquetas/nombres para comparación tolerante: minúsculas, sin acentos, sin espacios extra
+  const normalizeLabel = (s) => {
+    try {
+      return String(s || '')
+        .normalize('NFD')
+        .replace(/\p{Diacritic}+/gu, '')
+        .toLowerCase()
+        .trim();
+    } catch (_) {
+      return String(s || '').toLowerCase().trim();
+    }
+  };
+
+  // Aplica respuesta del webhook (JSON) a la ficha personalizada y guarda nota de Recomendaciones
+  const handleWebhookStructuredResponse = async (data) => {
+    try {
+      if (!data || typeof data !== 'object') return;
+      const apptId = viewingAttentionId;
+      if (!apptId) return;
+
+      // Ubicar form seleccionado y campos
+      const selectedId = selectedCustomFormIdByAppt[apptId];
+      if (!selectedId) {
+        console.warn('[webhook] No hay ficha seleccionada para autollenado');
+      }
+
+      // Resolver especialidad y formulario desde caché
+      let specId = null;
+      try {
+        const appt = attentions.find(a => a.id === apptId);
+        specId = appointmentDetails[apptId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+        if (!specId) {
+          const specialtyName = appointmentDetails[apptId]?.specialty_name || appt?.specialty || '';
+          const spec = specialties.find(s => normalizeLabel(s.name) === normalizeLabel(specialtyName));
+          specId = spec?.id || null;
+        }
+      } catch (_) {}
+
+      let forms = (specId && customFormsCache[String(specId)]) || [];
+      let form = (forms || []).find(f => String(f.id) === String(selectedId));
+      if (!form) {
+        // Buscar en otras especialidades cacheadas
+        for (const key of Object.keys(customFormsCache)) {
+          const arr = customFormsCache[key] || [];
+          const match = arr.find(f => String(f.id) === String(selectedId));
+          if (match) { form = match; break; }
+        }
+      }
+      if (!form) return;
+
+      // Construir mapa de etiqueta/nombre normalizado -> field.name
+      const labelToFieldName = {};
+      (form.fields || []).forEach(field => {
+        const label = field?.label || field?.name || '';
+        const norm = normalizeLabel(label);
+        if (norm) labelToFieldName[norm] = field.name;
+      });
+
+      // Preparar nuevos valores fusionados con los actuales
+      const currentValues = { ...(customFormValuesByAppt[apptId] || {}) };
+      let touched = false;
+
+      for (const [k, v] of Object.entries(data)) {
+        const normKey = normalizeLabel(k);
+        if (!normKey) continue;
+        if (normKey === 'recomendaciones') {
+          const rec = typeof v === 'string' ? v : (v != null ? JSON.stringify(v) : '');
+          if (rec) addOrUpdateNote(apptId, rec);
+          continue;
+        }
+        const fieldName = labelToFieldName[normKey];
+        if (!fieldName) continue;
+        const valueStr = typeof v === 'string' ? v : (v != null ? JSON.stringify(v) : '');
+        if (currentValues[fieldName] !== valueStr) {
+          currentValues[fieldName] = valueStr;
+          touched = true;
+        }
+      }
+
+      if (touched && selectedId) {
+        // Guardar en estado y persistir al backend
+        setCustomFormValuesByAppt(prev => ({ ...prev, [apptId]: currentValues }));
+        try {
+          await ensureSpecialtiesLoaded();
+          // Asegurar specId si falta
+          if (!specId) {
+            const appt = attentions.find(a => a.id === apptId);
+            const specialtyName = appointmentDetails[apptId]?.specialty_name || appt?.specialty || '';
+            const spec = specialties.find(s => normalizeLabel(s.name) === normalizeLabel(specialtyName));
+            specId = spec?.id || null;
+          }
+          if (specId) {
+            const payload = { specialtyId: specId, formId: selectedId, values: currentValues };
+            await appointmentsAPI.saveCustomForm(apptId, payload);
+          }
+          toast.success('Ficha autocompletada con la respuesta del webhook');
+        } catch (e) {
+          console.warn('Error guardando autollenado de ficha:', e);
+        }
+      }
+    } catch (e) {
+      console.warn('No se pudo procesar respuesta del webhook para autollenado', e);
+    }
+  };
 
   const openRipsDetails = (attentionId) => {
     setRipsForAttentionId(attentionId);
     setShowRipsModal(true);
   };
+
+  // Cargar usuario actual para mostrar en "Creado por"
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await authAPI.getProfile();
+        const u = resp?.data || resp || {};
+        const name = [u.first_name || u.firstName, u.last_name || u.lastName].filter(Boolean).join(' ').trim();
+        setCurrentUser({ id: u.id, name: name || (u.email || 'Usuario') });
+      } catch (_) {
+        // ignorar
+      }
+    })();
+  }, []);
+
+  // Cargar Documentos CIE cuando cambia la atención enfocada
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!viewingAttentionId) return;
+        const resp = await cieDocsAPI.listByAppointment(viewingAttentionId);
+        const list = resp?.data?.items || resp?.items || [];
+        setCieDocsByAppt(prev => ({ ...prev, [viewingAttentionId]: list.map(it => ({
+          version: it.version || 'CIE-10',
+          code: it.code,
+          name: it.name,
+          createdBy: it.createdBy || '',
+          createdAt: new Date(it.createdAt).toLocaleString()
+        })) }));
+      } catch (_) {}
+    })();
+  }, [viewingAttentionId]);
 
   // Catálogos locales (ejemplo). Puedes reemplazarlos por tu fuente real.
   const availableProducts = [
@@ -237,6 +440,906 @@ const PatientFicha = () => {
       doc.document.write(html);
       doc.document.close();
     } catch (_) {}
+  };
+
+  // Cargar fichas personalizadas guardadas al abrir detalle de una atención
+  useEffect(() => {
+    const loadSavedCustomForm = async () => {
+      if (!viewingAttentionId) return;
+      try {
+        const resp = await appointmentsAPI.getCustomForms(viewingAttentionId);
+        const items = resp.data?.forms || resp.forms || [];
+        if (items && items.length) {
+          // Elegir el último actualizado o el primero si no hay timestamps
+          const sorted = [...items].sort((a, b) => {
+            const ta = new Date(a.updated_at || a.created_at || 0).getTime();
+            const tb = new Date(b.updated_at || b.created_at || 0).getTime();
+            return tb - ta;
+          });
+          const chosen = sorted[0];
+          const parsedValues = typeof chosen.values === 'string' ? (function(){ try { return JSON.parse(chosen.values); } catch(_) { return {}; } })() : (chosen.values || {});
+          const restoredId = chosen.form_id != null ? parseInt(chosen.form_id) : '';
+          setSelectedCustomFormIdByAppt(prev => ({ ...prev, [viewingAttentionId]: restoredId }));
+          setCustomFormValuesByAppt(prev => ({ ...prev, [viewingAttentionId]: parsedValues }));
+
+          // Asegurar que las plantillas de la especialidad estén en caché para poder renderizar y mostrar el nombre seleccionado
+          try {
+            await ensureSpecialtiesLoaded();
+            const appt = attentions.find(a=>a.id===viewingAttentionId);
+            let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+            if (!specId) {
+              const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+              const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+              specId = spec?.id || null;
+            }
+            let formsForSpec = [];
+            if (specId && !customFormsCache[String(specId)]) {
+              const respTpl = await specialtiesAPI.getTemplates(specId, 'customForms');
+              formsForSpec = (respTpl.data?.templates || []).map(t => {
+                const fieldsRaw = (t.content !== undefined ? t.content : (t.fields !== undefined ? t.fields : []));
+                let fields = [];
+                if (typeof fieldsRaw === 'string') {
+                  try { fields = JSON.parse(fieldsRaw); } catch (_) { fields = []; }
+                } else if (Array.isArray(fieldsRaw)) {
+                  fields = fieldsRaw;
+                } else {
+                  fields = [];
+                }
+                return { id: t.id, name: t.name, fields, isDefault: !!t.is_default, isActive: !!t.is_active };
+              });
+              setCustomFormsCache(prev => ({ ...prev, [String(specId)]: formsForSpec }));
+            } else if (specId) {
+              formsForSpec = customFormsCache[String(specId)] || [];
+            }
+            // Si la plantilla restaurada no está en la especialidad detectada, intentar localizarla en otra especialidad
+            const existsInSpec = (formsForSpec || []).some(f => String(f.id) === String(restoredId));
+            // Usar lista local de especialidades (sin depender del render state)
+            let allSpecs = Array.isArray(specialties) && specialties.length ? specialties : [];
+            if (!allSpecs.length) {
+              try {
+                const sResp = await specialtiesAPI.getAll();
+                allSpecs = sResp.data?.specialties || sResp.data || [];
+              } catch (_) { allSpecs = []; }
+            }
+            if (!existsInSpec && Array.isArray(allSpecs) && allSpecs.length) {
+              for (const s of allSpecs) {
+                try {
+                  const cacheKey = String(s.id);
+                  let forms = customFormsCache[cacheKey];
+                  if (!forms) {
+                    const r = await specialtiesAPI.getTemplates(s.id, 'customForms');
+                    forms = (r.data?.templates || []).map(t => {
+                      const fieldsRaw = (t.content !== undefined ? t.content : (t.fields !== undefined ? t.fields : []));
+                      let fields = [];
+                      if (typeof fieldsRaw === 'string') {
+                        try { fields = JSON.parse(fieldsRaw); } catch (_) { fields = []; }
+                      } else if (Array.isArray(fieldsRaw)) {
+                        fields = fieldsRaw;
+                      } else {
+                        fields = [];
+                      }
+                      return { id: t.id, name: t.name, fields, isDefault: !!t.is_default, isActive: !!t.is_active };
+                    });
+                    setCustomFormsCache(prev => ({ ...prev, [cacheKey]: forms }));
+                  }
+                  const match = (forms || []).find(f => String(f.id) === String(restoredId));
+                  if (match) break;
+                } catch (_) {}
+              }
+            }
+          } catch (_) {}
+        }
+      } catch (_) {
+        // Silencioso: si falla la carga no bloqueamos la UI
+      }
+    };
+    loadSavedCustomForm();
+  }, [viewingAttentionId]);
+
+  // Si hay un formId seleccionado pero no está en caché, buscarlo en todas las especialidades y cachearlo para renderizar campos
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!viewingAttentionId) return;
+        const selectedId = selectedCustomFormIdByAppt[viewingAttentionId];
+        if (!selectedId) return;
+        const existsSomewhere = Object.values(customFormsCache).some(arr => (arr || []).some(f => String(f.id) === String(selectedId)));
+        if (existsSomewhere) return;
+        let allSpecs = Array.isArray(specialties) && specialties.length ? specialties : [];
+        if (!allSpecs.length) {
+          try {
+            const sResp = await specialtiesAPI.getAll();
+            allSpecs = sResp.data?.specialties || sResp.data || [];
+          } catch (_) { allSpecs = []; }
+        }
+        for (const s of allSpecs) {
+          try {
+            const cacheKey = String(s.id);
+            const r = await specialtiesAPI.getTemplates(s.id, 'customForms');
+            const forms = (r.data?.templates || []).map(t => {
+              const fieldsRaw = (t.content !== undefined ? t.content : (t.fields !== undefined ? t.fields : []));
+              let fields = [];
+              if (typeof fieldsRaw === 'string') {
+                try { fields = JSON.parse(fieldsRaw); } catch (_) { fields = []; }
+              } else if (Array.isArray(fieldsRaw)) {
+                fields = fieldsRaw;
+              } else {
+                fields = [];
+              }
+              return { id: t.id, name: t.name, fields, isDefault: !!t.is_default, isActive: !!t.is_active };
+            });
+            setCustomFormsCache(prev => ({ ...prev, [cacheKey]: forms }));
+            const match = forms.find(f => String(f.id) === String(selectedId));
+            if (match) break;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    })();
+  }, [selectedCustomFormIdByAppt, viewingAttentionId]);
+
+  // Construye el contexto clínico para el asistente
+  const buildAiContext = (appointmentId) => {
+    try {
+      const appt = attentions.find(a => a.id === appointmentId) || {};
+      const details = appointmentDetails[appointmentId] || {};
+      const evolutionHtml = evolutionContentByAppt[appointmentId] || '';
+      const prescriptionsHtml = prescriptionsContentByAppt[appointmentId] || '';
+      const adverseHtml = adverseContentByAppt[appointmentId] || '';
+      const consentsHtml = consentsContentByAppt[appointmentId] || '';
+      const orders = medicalOrdersByAppt[appointmentId] || [];
+      const formId = selectedCustomFormIdByAppt[appointmentId];
+      const formValues = (customFormValuesByAppt[appointmentId] || {});
+
+      const context = {
+        patient: {
+          id: patient?.id,
+          firstName: patient?.first_name,
+          lastName: patient?.last_name,
+          identificationType: patient?.identification_type,
+          identificationNumber: patient?.identification_number,
+          birthDate: patient?.birth_date,
+          age: (typeof calculateAge === 'function' ? calculateAge(patient?.birth_date) : undefined),
+          gender: patient?.gender,
+          agreement: patient?.agreement,
+          patientType: patient?.patient_type,
+          medicalHistoryHtml: patient?.medical_history || ''
+        },
+        appointment: {
+          id: appointmentId,
+          date: appt.date,
+          time: appt.time,
+          status: details.status || appt.status,
+          type: appt.type,
+          specialtyId: details.specialty_id || appt.specialty_id || appt.specialtyId,
+          specialtyName: details.specialty_name || appt.specialty,
+          doctorFullName: details.doctorFullName || appt.doctor_name,
+          resource: details.resource
+        },
+        htmlSections: {
+          evolutionHtml,
+          prescriptionsHtml,
+          adverseHtml,
+          consentsHtml
+        },
+        medicalOrders: orders,
+        customForm: {
+          formId,
+          values: formValues
+        }
+      };
+      return context;
+    } catch (_) {
+      return {};
+    }
+  };
+
+  const appendAiMessage = (appointmentId, role, content) => {
+    setAiMessagesByAppt(prev => ({
+      ...prev,
+      [appointmentId]: [ ...(prev[appointmentId] || []), { role, content } ]
+    }));
+  };
+
+  useEffect(() => {
+    try {
+      if (aiScrollRef.current) {
+        aiScrollRef.current.scrollTop = aiScrollRef.current.scrollHeight;
+      }
+    } catch (_) {}
+  }, [aiMessagesByAppt, aiLoadingByAppt, viewingAttentionId]);
+
+  // Persistencia simple de notas en localStorage por atención
+  useEffect(() => {
+    try {
+      // Nueva clave por paciente para evitar colisiones y pérdidas al recargar
+      const keyV2 = `romedicals_notes_v2:patient:${patient?.id || 'unknown'}`;
+      const rawV2 = localStorage.getItem(keyV2);
+      if (rawV2) {
+        const parsed = JSON.parse(rawV2);
+        if (parsed && typeof parsed === 'object') {
+          setNotesByAppt(parsed);
+          return;
+        }
+      }
+      // Compatibilidad con versión anterior (global)
+      const rawV1 = localStorage.getItem('romedicals_notes_v1');
+      if (rawV1) {
+        const parsed = JSON.parse(rawV1);
+        if (parsed && typeof parsed === 'object') {
+          setNotesByAppt(parsed);
+        }
+      }
+    } catch (_) {}
+  }, [patient?.id]);
+
+  useEffect(() => {
+    try {
+      const keyV2 = `romedicals_notes_v2:patient:${patient?.id || 'unknown'}`;
+      localStorage.setItem(keyV2, JSON.stringify(notesByAppt || {}));
+      // Escribir también la v1 para compatibilidad con sesiones abiertas en otras pestañas
+      localStorage.setItem('romedicals_notes_v1', JSON.stringify(notesByAppt || {}));
+    } catch (_) {}
+  }, [notesByAppt, patient?.id]);
+
+  const addOrUpdateNote = (appointmentId, content) => {
+    setNotesByAppt(prev => {
+      const list = [...(prev[appointmentId] || [])];
+      const editing = notesEditingByAppt[appointmentId];
+      const now = new Date().toISOString();
+      if (editing && editing.id) {
+        const idx = list.findIndex(n => n.id === editing.id);
+        if (idx >= 0) {
+          list[idx] = { ...list[idx], content, updatedAt: now };
+        }
+      } else {
+        const id = `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        list.unshift({ id, content, createdAt: now, updatedAt: now });
+      }
+      const next = { ...prev, [appointmentId]: list };
+      // Guardado inmediato para mayor robustez ante recargas rápidas
+      try {
+        const keyV2 = `romedicals_notes_v2:patient:${patient?.id || 'unknown'}`;
+        localStorage.setItem(keyV2, JSON.stringify(next));
+        localStorage.setItem('romedicals_notes_v1', JSON.stringify(next));
+      } catch (_) {}
+      return next;
+    });
+    setNotesInputByAppt(prev => ({ ...prev, [appointmentId]: '' }));
+    setNotesEditingByAppt(prev => ({ ...prev, [appointmentId]: null }));
+  };
+
+  const startEditNote = (appointmentId, note) => {
+    setNotesEditingByAppt(prev => ({ ...prev, [appointmentId]: { id: note.id, content: note.content } }));
+    setNotesInputByAppt(prev => ({ ...prev, [appointmentId]: note.content }));
+  };
+
+  const cancelEditNote = (appointmentId) => {
+    setNotesEditingByAppt(prev => ({ ...prev, [appointmentId]: null }));
+    setNotesInputByAppt(prev => ({ ...prev, [appointmentId]: '' }));
+  };
+
+  const startAudioRecording = async () => {
+    if (isRecordingAudio || uploadingAudio) return;
+    try {
+      // Iniciar nueva grabación invalida el último audio listo
+      lastAudioBlobRef.current = null;
+      lastAudioFilenameRef.current = '';
+      setHasLastAudio(false);
+      lastAudioSourceRef.current = '';
+      ignoreRecordedOnStopRef.current = false;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      audioChunksRef.current = [];
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      mr.onstop = async () => {
+        try {
+          const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          audioChunksRef.current = [];
+          // Detener tracks del stream
+          try { (mediaStreamRef.current?.getTracks() || []).forEach(t => t.stop()); } catch (_) {}
+          // Si se solicitó enviar mientras grababa/pausado, enviar ahora
+          if (pendingAutoSendRef.current) {
+            pendingAutoSendRef.current = false;
+            try {
+              // Si se adjuntó un archivo durante la grabación, priorizar el adjunto
+              const toSend = lastAudioSourceRef.current === 'attached' && lastAudioBlobRef.current ? lastAudioBlobRef.current : blob;
+              await uploadAudioBlob(toSend);
+            } catch (e) {
+              console.error('Autoenvío falló:', e);
+            } finally {
+              // Limpiar para evitar dobles envíos y reflejar estado
+              lastAudioBlobRef.current = null;
+              lastAudioFilenameRef.current = '';
+              lastAudioSourceRef.current = '';
+              setHasLastAudio(false);
+            }
+          } else {
+            // Si se adjuntó un archivo mientras grababa, ignorar el grabado
+            if (ignoreRecordedOnStopRef.current || lastAudioSourceRef.current === 'attached') {
+              // Mantener adjunto como último
+              // No modificar lastAudioBlobRef ni filename
+              // Asegurar bandera lista para enviar
+              setHasLastAudio(!!lastAudioBlobRef.current);
+              toast.success('Archivo adjunto listo para enviar');
+            } else {
+              // Dejar grabación como última si no hay adjunto
+              lastAudioBlobRef.current = blob;
+              lastAudioFilenameRef.current = `audio-${Date.now()}.webm`;
+              lastAudioSourceRef.current = 'recorded';
+              setHasLastAudio(true);
+              toast.success('Grabación lista para enviar');
+            }
+          }
+        } catch (err) {
+          console.error('Error procesando audio:', err);
+          toast.error('No se pudo procesar el audio');
+        } finally {
+          mediaRecorderRef.current = null;
+          mediaStreamRef.current = null;
+        }
+      };
+      mediaRecorderRef.current = mr;
+      mr.start();
+      setIsRecordingAudio(true);
+      setIsPausedAudio(false);
+      // Timer
+      recordAccumMsRef.current = 0;
+      recordStartRef.current = Date.now();
+      setRecordElapsedMs(0);
+      try { if (recordTimerRef.current) clearInterval(recordTimerRef.current); } catch (_) {}
+      recordTimerRef.current = setInterval(() => {
+        const now = Date.now();
+        const elapsed = recordAccumMsRef.current + (now - recordStartRef.current);
+        setRecordElapsedMs(elapsed);
+      }, 500);
+      toast.success('Grabación iniciada');
+    } catch (err) {
+      console.error('No se pudo iniciar la grabación:', err);
+      toast.error('Permiso de micrófono denegado o no disponible');
+    }
+  };
+
+  const stopAudioRecording = () => {
+    if (!isRecordingAudio || !mediaRecorderRef.current) return;
+    try {
+      mediaRecorderRef.current.stop();
+    } catch (_) {}
+    setIsRecordingAudio(false);
+    setIsPausedAudio(false);
+    try { if (recordTimerRef.current) clearInterval(recordTimerRef.current); } catch (_) {}
+    recordTimerRef.current = null;
+    recordAccumMsRef.current = 0;
+    recordStartRef.current = 0;
+    setRecordElapsedMs(0);
+    toast('Grabación detenida');
+  };
+
+  const pauseOrResumeRecording = () => {
+    if (!isRecordingAudio || !mediaRecorderRef.current) return;
+    try {
+      if (!isPausedAudio) {
+        mediaRecorderRef.current.pause();
+        setIsPausedAudio(true);
+        toast('Grabación en pausa');
+        try {
+          if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+          recordTimerRef.current = null;
+          recordAccumMsRef.current = recordAccumMsRef.current + (Date.now() - recordStartRef.current);
+        } catch (_) {}
+      } else {
+        mediaRecorderRef.current.resume();
+        setIsPausedAudio(false);
+        toast('Grabación reanudada');
+        recordStartRef.current = Date.now();
+        try { if (recordTimerRef.current) clearInterval(recordTimerRef.current); } catch (_) {}
+        recordTimerRef.current = setInterval(() => {
+          const now = Date.now();
+          const elapsed = recordAccumMsRef.current + (now - recordStartRef.current);
+          setRecordElapsedMs(elapsed);
+        }, 500);
+      }
+    } catch (err) {
+      console.error('No se pudo pausar/reanudar:', err);
+    }
+  };
+
+  const testSound = async () => {
+    // Mostrar que el mic recibe señal (sin reproducir audio)
+    if (micTestActive) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      micCtxRef.current = ctx;
+      const src = ctx.createMediaStreamSource(stream);
+      micSrcRef.current = src;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.85;
+      micAnalyserRef.current = analyser;
+      src.connect(analyser);
+      setMicTestActive(true);
+      micTestEndRef.current = Date.now() + 5000;
+      setMicTestRemainingMs(5000);
+      const data = new Uint8Array(analyser.fftSize);
+      const loop = () => {
+        analyser.getByteTimeDomainData(data);
+        // Medición sensible: combinar pico y RMS
+        let sum = 0;
+        let peak = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128;
+          sum += v * v;
+          const av = Math.abs(v);
+          if (av > peak) peak = av;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        const weighted = Math.max(peak, rms * 0.5);
+        setMicLevel(Math.min(1, weighted * 6));
+        const remain = Math.max(0, micTestEndRef.current - Date.now());
+        setMicTestRemainingMs(remain);
+        micRAFRef.current = requestAnimationFrame(loop);
+      };
+      loop();
+      // Detener después de 5 segundos
+      setTimeout(() => {
+        try { if (micRAFRef.current) cancelAnimationFrame(micRAFRef.current); } catch (_) {}
+        micRAFRef.current = null;
+        try { (micStreamRef.current?.getTracks() || []).forEach(t => t.stop()); } catch (_) {}
+        try { micCtxRef.current?.close(); } catch (_) {}
+        micStreamRef.current = null;
+        micCtxRef.current = null;
+        micSrcRef.current = null;
+        micAnalyserRef.current = null;
+        setMicTestActive(false);
+        setMicLevel(0);
+        setMicTestRemainingMs(0);
+      }, 5000);
+    } catch (e) {
+      console.error('No se pudo iniciar prueba de micrófono:', e);
+      toast.error('No se pudo acceder al micrófono');
+    }
+  };
+
+  const handleAttachClick = () => {
+    try {
+      if (isRecordingAudio) {
+        toast.error('Detén la grabación para adjuntar un archivo');
+        return;
+      }
+      attachAudioInputRef.current?.click();
+    } catch (_) {}
+  };
+
+  const handleAudioFileSelected = (e) => {
+    try {
+      const file = e?.target?.files?.[0];
+      if (!file) return;
+      const type = String(file.type || '').toLowerCase();
+      const name = String(file.name || '');
+      const ext = name.split('.').pop()?.toLowerCase() || '';
+      const isAudioLike = type.startsWith('audio/');
+      const isWebm = type === 'video/webm' || ext === 'webm';
+      if (!isAudioLike && !isWebm) {
+        toast.error('Selecciona un archivo de audio (.webm permitido)');
+        try { e.target.value = ''; } catch (_) {}
+        return;
+      }
+      lastAudioBlobRef.current = file;
+      lastAudioFilenameRef.current = file.name || `audio-file-${Date.now()}`;
+      lastAudioSourceRef.current = 'attached';
+      // Si está grabando, marcar para ignorar el blob grabado cuando termine
+      if (isRecordingAudio) {
+        ignoreRecordedOnStopRef.current = true;
+      }
+      setHasLastAudio(true);
+      toast.success('Audio adjuntado, listo para enviar');
+    } catch (err) {
+      console.error('Error adjuntando audio:', err);
+      toast.error('No se pudo adjuntar el audio');
+    } finally {
+      try { if (e?.target) e.target.value = ''; } catch (_) {}
+    }
+  };
+
+  const sendLastAudio = async () => {
+    // Si está grabando o en pausa: detener y enviar cuando termine onstop
+    if (isRecordingAudio && mediaRecorderRef.current) {
+      if (uploadingAudio) return;
+      pendingAutoSendRef.current = true;
+      try { mediaRecorderRef.current.stop(); } catch (_) {}
+      setIsRecordingAudio(false);
+      setIsPausedAudio(false);
+      try { if (recordTimerRef.current) clearInterval(recordTimerRef.current); } catch (_) {}
+      recordTimerRef.current = null;
+      return;
+    }
+    const blob = lastAudioBlobRef.current;
+    if (!blob) {
+      toast.error('No hay audio para enviar');
+      return;
+    }
+    await uploadAudioBlob(blob);
+    // Limpiar para evitar doble envío del mismo blob
+    lastAudioBlobRef.current = null;
+    lastAudioFilenameRef.current = '';
+    lastAudioSourceRef.current = '';
+    setHasLastAudio(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      try { if (recordTimerRef.current) clearInterval(recordTimerRef.current); } catch (_) {}
+      recordTimerRef.current = null;
+      try { if (micRAFRef.current) cancelAnimationFrame(micRAFRef.current); } catch (_) {}
+      micRAFRef.current = null;
+      try { (micStreamRef.current?.getTracks() || []).forEach(t => t.stop()); } catch (_) {}
+      try { micCtxRef.current?.close(); } catch (_) {}
+    };
+  }, []);
+
+  const getAudioArcButtons = () => {
+    const items = [];
+    items.push({ key: 'test', onClick: testSound, label: '♪', title: 'Prueba de sonido' });
+    items.push({ key: 'attach', onClick: handleAttachClick, label: '📎', title: 'Adjuntar audio' });
+    if (!isRecordingAudio) {
+      items.push({ key: 'start', onClick: startAudioRecording, label: '⏺', title: 'Iniciar grabación' });
+    } else {
+      items.push({ key: 'pause', onClick: pauseOrResumeRecording, label: isPausedAudio ? '⏵' : '⏸', title: isPausedAudio ? 'Reanudar' : 'Pausar' });
+      items.push({ key: 'stop', onClick: stopAudioRecording, label: '■', title: 'Detener' });
+    }
+    // Permitir enviar si hay blob listo o si está grabando/pausado (hará stop+enviar)
+    const canSendNow = hasLastAudio || isRecordingAudio;
+    items.push({ key: 'send', onClick: sendLastAudio, label: '➤', title: 'Enviar audio', disabled: !canSendNow || uploadingAudio });
+    return items;
+  };
+
+  const uploadAudioBlob = async (blob) => {
+    try {
+      setUploadingAudio(true);
+      const url = 'https://webhook.latenode.com/17495/prod/1c2ca0b9-9338-4ac6-b3c7-d8b6e96ef65e';
+      const filename = `audio-${Date.now()}.webm`;
+
+      // Intento 1: multipart/form-data (campos comunes: file y audio)
+      const form = new FormData();
+      form.append('file', blob, filename);
+      form.append('audio', blob, filename);
+      form.append('patientId', String(patient?.id || ''));
+      form.append('appointmentId', String(viewingAttentionId || ''));
+      form.append('userAgent', navigator.userAgent || '');
+      // Adjuntar JSON con los campos de la ficha personalizada
+      let debugMeta = null;
+      try {
+        const customFormValues = (customFormValuesByAppt && viewingAttentionId) ? (customFormValuesByAppt[viewingAttentionId] || {}) : {};
+        const customFormId = (selectedCustomFormIdByAppt && viewingAttentionId) ? (selectedCustomFormIdByAppt[viewingAttentionId] || '') : '';
+        // localiza nombre y schema (fields) de la ficha
+        let customFormName = '';
+        let customFormSchema = [];
+        let customFormFieldNames = [];
+        try {
+          const appt = attentions.find(a=>a.id===viewingAttentionId);
+          let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+          if (!specId) {
+            const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+            const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+            specId = spec?.id || null;
+          }
+          const forms = customFormsCache[String(specId)] || [];
+          const formObj = forms.find(f => String(f.id) === String(customFormId));
+          if (formObj) {
+            customFormName = formObj.name || '';
+            customFormSchema = Array.isArray(formObj.fields) ? formObj.fields : [];
+            customFormFieldNames = (formObj.fields || []).map(f => (f.label || f.name || '')).filter(Boolean);
+          }
+        } catch (_) {}
+        const customFormPayload = {
+          customFormId: customFormId || '',
+          customFormName,
+          schema: customFormSchema,
+          values: customFormValues || {}
+        };
+        // Campos planos
+        form.append('customFormValuesJson', JSON.stringify(customFormPayload.values));
+        form.append('customFormId', String(customFormPayload.customFormId));
+        form.append('customFormFieldNamesJson', JSON.stringify(customFormFieldNames));
+        // Campo combinado para facilitar debug en receptor
+        debugMeta = {
+          patientId: patient?.id || '',
+          appointmentId: viewingAttentionId || '',
+          customFormId: customFormPayload.customFormId,
+          customFormName: customFormPayload.customFormName,
+          customFormSchema: customFormPayload.schema,
+          customFormFieldNames,
+          customFormValues: customFormPayload.values,
+          userAgent: navigator.userAgent || ''
+        };
+        form.append('meta', JSON.stringify(debugMeta));
+      } catch (_) {
+        // ignorar si no existen estados de ficha personalizada
+      }
+
+      // Log de verificación: qué se está enviando en el FormData
+      try {
+        const debugEntries = {};
+        for (const [key, val] of form.entries()) {
+          if (val instanceof Blob) {
+            debugEntries[key] = { isFile: true, type: val.type, size: val.size };
+          } else {
+            const strVal = String(val);
+            debugEntries[key] = strVal.length > 500 ? (strVal.slice(0, 500) + '…') : strVal;
+          }
+        }
+        console.log('[uploadAudioBlob] Enviando FormData →', debugEntries);
+      } catch (e) {
+        console.warn('[uploadAudioBlob] No se pudo inspeccionar FormData', e);
+      }
+      let resp = await fetch(url, { method: 'POST', body: form });
+      try {
+        const ct = (resp.headers && resp.headers.get && resp.headers.get('content-type')) || '';
+        if (ct.includes('application/json')) {
+          const json = await resp.clone().json().catch(()=>null);
+          console.log('[uploadAudioBlob] Respuesta multipart (JSON):', json);
+          if (json && typeof json === 'object') {
+            handleWebhookStructuredResponse(json);
+          }
+        } else {
+          const txt = await resp.clone().text().catch(()=>'(sin texto)');
+          const trimmed = (txt || '').slice(0, 2000);
+          console.log('[uploadAudioBlob] Respuesta multipart (texto):', trimmed);
+          // Intentar parsear JSON si parece objeto
+          try {
+            const maybe = JSON.parse(txt);
+            if (maybe && typeof maybe === 'object') handleWebhookStructuredResponse(maybe);
+          } catch (_) {}
+        }
+      } catch (e) {
+        console.warn('[uploadAudioBlob] No se pudo leer respuesta multipart', e);
+      }
+
+      // Intento 2 (fallback): enviar raw binary con content-type audio/webm
+      if (!resp.ok) {
+        // Incluir metadatos mínimamente como query string
+        let metaUrl = url;
+        try {
+          const meta = debugMeta || {
+            patientId: patient?.id || '',
+            appointmentId: viewingAttentionId || '',
+            customFormId: (selectedCustomFormIdByAppt && viewingAttentionId) ? (selectedCustomFormIdByAppt[viewingAttentionId] || '') : '',
+            customFormName: (function(){
+              try {
+                const appt = attentions.find(a=>a.id===viewingAttentionId);
+                let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                if (!specId) {
+                  const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                  const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                  specId = spec?.id || null;
+                }
+                const forms = customFormsCache[String(specId)] || [];
+                const formObj = forms.find(f => String(f.id) === String((selectedCustomFormIdByAppt && viewingAttentionId) ? (selectedCustomFormIdByAppt[viewingAttentionId] || '') : ''));
+                return formObj?.name || '';
+              } catch(_) { return ''; }
+            })(),
+            customFormSchema: (function(){
+              try {
+                const appt = attentions.find(a=>a.id===viewingAttentionId);
+                let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                if (!specId) {
+                  const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                  const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                  specId = spec?.id || null;
+                }
+                const forms = customFormsCache[String(specId)] || [];
+                const formObj = forms.find(f => String(f.id) === String((selectedCustomFormIdByAppt && viewingAttentionId) ? (selectedCustomFormIdByAppt[viewingAttentionId] || '') : ''));
+                return Array.isArray(formObj?.fields) ? formObj.fields : [];
+              } catch(_) { return []; }
+            })(),
+            customFormFieldNames: (function(){
+              try {
+                const appt = attentions.find(a=>a.id===viewingAttentionId);
+                let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                if (!specId) {
+                  const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                  const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                  specId = spec?.id || null;
+                }
+                const forms = customFormsCache[String(specId)] || [];
+                const formObj = forms.find(f => String(f.id) === String((selectedCustomFormIdByAppt && viewingAttentionId) ? (selectedCustomFormIdByAppt[viewingAttentionId] || '') : ''));
+                return Array.isArray(formObj?.fields) ? (formObj.fields || []).map(f => (f.label || f.name || '')).filter(Boolean) : [];
+              } catch(_) { return []; }
+            })(),
+            customFormValues: (customFormValuesByAppt && viewingAttentionId) ? (customFormValuesByAppt[viewingAttentionId] || {}) : {},
+            userAgent: navigator.userAgent || ''
+          };
+          const qs = encodeURIComponent(JSON.stringify(meta));
+          metaUrl = `${url}?meta=${qs}`;
+          console.log('[uploadAudioBlob] Fallback URL con meta →', metaUrl);
+        } catch (_) {}
+        resp = await fetch(metaUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': (blob && blob.type) ? blob.type : 'application/octet-stream' },
+          body: blob
+        });
+        try {
+          const ct2 = (resp.headers && resp.headers.get && resp.headers.get('content-type')) || '';
+          if (ct2.includes('application/json')) {
+            const json2 = await resp.clone().json().catch(()=>null);
+            console.log('[uploadAudioBlob] Respuesta fallback (JSON):', json2);
+            if (json2 && typeof json2 === 'object') {
+              handleWebhookStructuredResponse(json2);
+            }
+          } else {
+            const txt2 = await resp.clone().text().catch(()=>'(sin texto)');
+            const trimmed2 = (txt2 || '').slice(0, 2000);
+            console.log('[uploadAudioBlob] Respuesta fallback (texto):', trimmed2);
+            // Intentar parsear JSON si parece objeto
+            try {
+              const maybe2 = JSON.parse(txt2);
+              if (maybe2 && typeof maybe2 === 'object') handleWebhookStructuredResponse(maybe2);
+            } catch (_) {}
+          }
+        } catch (e) {
+          console.warn('[uploadAudioBlob] No se pudo leer respuesta fallback', e);
+        }
+      }
+
+      if (!resp.ok) {
+        let txt = '';
+        try { txt = await resp.text(); } catch(_) {}
+        throw new Error(txt || 'El servidor rechazó el archivo');
+      }
+      try {
+        console.log('[uploadAudioBlob] Envío exitoso. Status:', resp.status);
+      } catch (_) {}
+      toast.success('Audio enviado');
+    } catch (err) {
+      console.error('Error enviando audio:', err);
+      toast.error('No se pudo enviar el audio (revisa CORS y conectividad)');
+    } finally {
+      setUploadingAudio(false);
+    }
+  };
+
+  // Construir resumen clínico consolidado del paciente
+  const buildPatientSummary = () => {
+    try {
+      const lines = [];
+      lines.push(`# Paciente`);
+      lines.push(`Nombre: ${patient?.first_name || ''} ${patient?.last_name || ''}`.trim());
+      lines.push(`Documento: ${patient?.identification_type || ''} ${patient?.identification_number || ''}`.trim());
+      lines.push(`Edad: ${typeof calculateAge === 'function' ? calculateAge(patient?.birth_date) : ''}`);
+      lines.push(`Tipo: ${patient?.patient_type || ''}`);
+      lines.push('');
+      lines.push(`# Resumen de atenciones`);
+      (attentions || []).forEach((a) => {
+        const date = a.date || a.appointment_date || a.appointmentDate || '';
+        lines.push(`- ${date} • ${a.type || 'Atención'} • ${a.specialty || ''} • ${a.doctor_name || ''}`);
+        if (a.reason) lines.push(`  Motivo: ${a.reason}`);
+      });
+      lines.push('');
+      lines.push(`# Documentos clínicos y secciones actuales`);
+      const currentId = viewingAttentionId;
+      const evol = evolutionContentByAppt[currentId] || '';
+      const presc = prescriptionsContentByAppt[currentId] || '';
+      const adverse = adverseContentByAppt[currentId] || '';
+      const cons = consentsContentByAppt[currentId] || '';
+      if (evol) lines.push(`## Evolución actual\n${evol.replace(/<[^>]+>/g, ' ')}`);
+      if (presc) lines.push(`## Prescripción actual\n${presc.replace(/<[^>]+>/g, ' ')}`);
+      if (adverse) lines.push(`## Eventos adversos actuales\n${adverse.replace(/<[^>]+>/g, ' ')}`);
+      if (cons) lines.push(`## Consentimientos actuales\n${cons.replace(/<[^>]+>/g, ' ')}`);
+
+      return lines.join('\n');
+    } catch (_) { return ''; }
+  };
+
+  const openSummary = async () => {
+    try {
+      setSummaryLoading(true);
+      setShowSummaryModal(true);
+      const plain = buildPatientSummary();
+      let content = plain;
+      try {
+        const prompt = `Genera un resumen clínico claro y conciso del siguiente historial y datos del paciente. Destaca diagnósticos, tratamientos, evolución, riesgos y próximos pasos. Devuelve en formato Markdown con secciones:
+        - Datos del paciente
+        - Línea de tiempo de atenciones
+        - Diagnósticos y hallazgos clave
+        - Tratamientos/prescripciones relevantes
+        - Riesgos y alertas
+        - Recomendaciones y próximos pasos
+
+        CONTENIDO:
+        ${plain}`;
+        const resp = await aiAPI.assist({ prompt });
+        const aiText = resp?.data?.text || resp?.data?.content || resp?.text || '';
+        if (aiText) content = aiText;
+      } catch (_) {
+        // Si falla la IA, mostramos el consolidado plano
+      }
+      setSummaryContent(content);
+    } catch (_) {
+      setSummaryContent('No se pudo generar el resumen.');
+    } finally {
+      setSummaryLoading(false);
+    }
+  };
+
+  const sendAiPrompt = async (appointmentId, intent, userPrompt) => {
+    if (!appointmentId) return;
+    const prompt = (userPrompt || '').trim();
+    if (!prompt && intent === 'chat') return;
+
+    try {
+      setAiLoadingByAppt(prev => ({ ...prev, [appointmentId]: true }));
+      if (prompt) appendAiMessage(appointmentId, 'user', prompt);
+
+      const context = buildAiContext(appointmentId);
+      const payload = {
+        intent, // 'chat' | 'evolution' | 'prescription' | 'custom_form_fill'
+        prompt: prompt || undefined,
+        patientId: patient?.id,
+        appointmentId,
+        context
+      };
+
+      const resp = await aiAPI.assist(payload);
+      const data = resp?.data || {};
+      const message = data.message || data.reply || data.text || '';
+      if (message) appendAiMessage(appointmentId, 'assistant', message);
+
+      // Aplicación automática según intent
+      if (intent === 'evolution' && (data.suggestedEvolutionHtml || data.html || message)) {
+        const html = data.suggestedEvolutionHtml || data.html || message;
+        setEvolutionContentByAppt(prev => ({ ...prev, [appointmentId]: html }));
+        toast.success('Evolución sugerida aplicada');
+      }
+      if (intent === 'prescription' && (data.suggestedPrescriptionHtml || data.html || message)) {
+        const html = data.suggestedPrescriptionHtml || data.html || message;
+        setPrescriptionsContentByAppt(prev => ({ ...prev, [appointmentId]: html }));
+        toast.success('Prescripción sugerida aplicada');
+      }
+      if (intent === 'clinical_history' && (data.suggestedHistoryHtml || data.html || message)) {
+        const html = data.suggestedHistoryHtml || data.html || message;
+        setHistoryDraft(html);
+        setShowHistoryEditor(true);
+        toast.success('Antecedentes sugeridos aplicados');
+      }
+      if (intent === 'custom_form_fill' && (data.fields || data.values)) {
+        const values = data.fields || data.values || {};
+        setCustomFormValuesByAppt(prev => ({
+          ...prev,
+          [appointmentId]: { ...(prev[appointmentId] || {}), ...values }
+        }));
+        toast.success('Ficha rellenada con IA');
+      }
+      if (intent === 'full_fill') {
+        // Guardar en estado de preview sin aplicar
+        const preview = {
+          historyHtml: data.suggestedHistoryHtml || '',
+          evolutionHtml: data.suggestedEvolutionHtml || '',
+          prescriptionHtml: data.suggestedPrescriptionHtml || '',
+          fields: data.fields || data.values || {}
+        };
+        setAiPreviewByAppt(prev => ({ ...prev, [appointmentId]: preview }));
+        setShowAiPreview(true);
+      }
+    } catch (e) {
+      try {
+        const respData = e?.response?.data;
+        const msg = respData?.error || respData?.message || e?.message || 'Error en el asistente';
+        if (respData?.details) console.error('AI details:', respData.details);
+        console.error('Error asistente IA:', e);
+        toast.error(msg);
+      } catch (_) {
+        console.error('Error asistente IA:', e);
+        toast.error('Error en el asistente');
+      }
+    } finally {
+      setAiLoadingByAppt(prev => ({ ...prev, [appointmentId]: false }));
+      setAiInputByAppt(prev => ({ ...prev, [appointmentId]: '' }));
+    }
   };
 
   const loadConsentsTemplates = async () => {
@@ -1215,6 +2318,21 @@ const PatientFicha = () => {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
+                      className="btn-secondary text-xs md:text-sm"
+                      onClick={()=>setShowAiPanel(v=>!v)}
+                    >
+                      {showAiPanel ? 'Ocultar IA' : 'Asistente IA'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openSummary}
+                      className="btn-secondary text-xs md:text-sm"
+                      title="Ver resumen clínico"
+                    >
+                      Resumen
+                    </button>
+                    <button
+                      type="button"
                       onClick={()=>printAttention(viewingAttentionId)}
                       className="btn-secondary text-xs md:text-sm"
                       title="Imprimir atención"
@@ -1253,6 +2371,363 @@ const PatientFicha = () => {
               </div>
             </div>
           </div>
+          {showAiPanel && (
+            <div className="fixed bottom-4 right-4 z-50 w-96 max-w-[90vw] shadow-xl border rounded-lg bg-white">
+              <div className="px-3 py-2 border-b flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-gray-900 text-sm">Asistente de IA</span>
+                </div>
+                <button type="button" className="text-gray-500 hover:text-gray-700" onClick={()=>setShowAiPanel(false)} aria-label="Cerrar">×</button>
+              </div>
+              <div className="p-3">
+                <style>{`
+                  @keyframes fadeInUp { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+                  @keyframes dotPulse { 0% { transform: translateY(0); opacity: .4; } 50% { transform: translateY(-3px); opacity: 1; } 100% { transform: translateY(0); opacity: .4; } }
+                `}</style>
+                <div className="h-64 overflow-y-auto border rounded p-2 bg-white" ref={aiScrollRef}>
+                  {(aiMessagesByAppt[viewingAttentionId] || []).length === 0 && (
+                    <div className="text-sm text-gray-500">Inicia una consulta. El asistente considerará datos del paciente y de la atención actual.</div>
+                  )}
+                  {(aiMessagesByAppt[viewingAttentionId] || []).map((m, idx) => (
+                    <div key={idx} className="mb-2">
+                      <div className="text-xs text-gray-500">{m.role === 'user' ? 'Médico' : 'Asistente'}</div>
+                      <div className={m.role === 'user' ? 'bg-blue-50 border border-blue-200 rounded p-2 text-sm' : 'bg-gray-50 border border-gray-200 rounded p-2 text-sm'}
+                        style={{ animation: 'fadeInUp 220ms ease-out' }}
+                        dangerouslySetInnerHTML={{ __html: /<\w+[^>]*>/.test(m.content) ? m.content : (m.content || '').replace(/\n/g,'<br>') }}
+                      />
+                    </div>
+                  ))}
+                  {aiLoadingByAppt[viewingAttentionId] && (
+                    <div className="mb-2">
+                      <div className="text-xs text-gray-500">Asistente</div>
+                      <div className="bg-gray-50 border border-gray-200 rounded p-2 text-sm inline-flex items-center space-x-1" style={{ animation: 'fadeInUp 200ms ease-out' }}>
+                        <span className="w-2 h-2 bg-gray-400 rounded-full" style={{ animation: 'dotPulse 1s infinite', animationDelay: '0ms' }} />
+                        <span className="w-2 h-2 bg-gray-400 rounded-full" style={{ animation: 'dotPulse 1s infinite', animationDelay: '200ms' }} />
+                        <span className="w-2 h-2 bg-gray-400 rounded-full" style={{ animation: 'dotPulse 1s infinite', animationDelay: '400ms' }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="mt-2 flex items-end gap-2">
+                  <textarea
+                    className="input-field flex-1"
+                    rows="2"
+                    placeholder="Escribe tu consulta clínica..."
+                    value={aiInputByAppt[viewingAttentionId] || ''}
+                    onChange={(e)=>setAiInputByAppt(prev=>({ ...prev, [viewingAttentionId]: e.target.value }))}
+                  />
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={()=>sendAiPrompt(viewingAttentionId,'chat', aiInputByAppt[viewingAttentionId] || '')}
+                    disabled={!!aiLoadingByAppt[viewingAttentionId]}
+                  >
+                    {aiLoadingByAppt[viewingAttentionId] ? 'Enviando...' : 'Enviar'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={()=>sendAiPrompt(viewingAttentionId,'full_fill', aiInputByAppt[viewingAttentionId] || 'Generar borrador de atención completo')}
+                    disabled={!!aiLoadingByAppt[viewingAttentionId]}
+                  >
+                    {aiLoadingByAppt[viewingAttentionId] ? 'Generando...' : 'Prellenado IA'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {showNotesPanel && (
+            <div className="fixed bottom-4 right-4 z-50 w-96 max-w-[90vw] shadow-xl border rounded-lg bg-white">
+              <div className="px-3 py-2 border-b flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-gray-900 text-sm">Notas del médico</span>
+                </div>
+                <button type="button" className="text-gray-500 hover:text-gray-700" onClick={()=>setShowNotesPanel(false)} aria-label="Cerrar">×</button>
+              </div>
+              <div className="p-3">
+                <style>{`
+                  @keyframes fadeInUp { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+                `}</style>
+                <div className="h-64 overflow-y-auto border rounded p-2 bg-white">
+                  {((notesByAppt[viewingAttentionId] || [])).length === 0 && (
+                    <div className="text-sm text-gray-500">No hay notas. Escribe una nota y guárdala.</div>
+                  )}
+                  {(notesByAppt[viewingAttentionId] || []).map((n) => (
+                    <div key={n.id} className="mb-2" style={{ animation: 'fadeInUp 220ms ease-out' }}>
+                      <div className="text-xs text-gray-500 mb-1">
+                        Creada: {new Date(n.createdAt).toLocaleString()} {n.updatedAt && n.updatedAt !== n.createdAt ? ` • Editada: ${new Date(n.updatedAt).toLocaleString()}` : ''}
+                      </div>
+                      <div className="bg-gray-50 border border-gray-200 rounded p-2 text-sm whitespace-pre-wrap">{n.content}</div>
+                      <div className="mt-1">
+                        <button className="text-xs text-blue-600 hover:underline" onClick={()=>startEditNote(viewingAttentionId, n)}>Editar</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 flex items-end gap-2">
+                  <textarea
+                    className="input-field flex-1"
+                    rows="3"
+                    placeholder="Escribe una nota..."
+                    value={notesInputByAppt[viewingAttentionId] || ''}
+                    onChange={(e)=>setNotesInputByAppt(prev=>({ ...prev, [viewingAttentionId]: e.target.value }))}
+                  />
+                  <div className="flex flex-col gap-1">
+                    {notesEditingByAppt[viewingAttentionId]?.id ? (
+                      <>
+                        <button type="button" className="btn-primary" onClick={()=>addOrUpdateNote(viewingAttentionId, notesInputByAppt[viewingAttentionId] || '')}>Guardar</button>
+                        <button type="button" className="btn-secondary" onClick={()=>cancelEditNote(viewingAttentionId)}>Cancelar</button>
+                      </>
+                    ) : (
+                      <button type="button" className="btn-primary" onClick={()=>addOrUpdateNote(viewingAttentionId, notesInputByAppt[viewingAttentionId] || '')} disabled={!((notesInputByAppt[viewingAttentionId]||'').trim())}>Agregar</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          {showAiPreview && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+              <div className="bg-white w-[min(920px,95vw)] max-h-[85vh] rounded-lg shadow-xl border flex flex-col">
+                <div className="px-4 py-2 border-b flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-gray-900">Vista previa IA</h3>
+                  <button className="text-gray-500 hover:text-gray-700" onClick={()=>setShowAiPreview(false)}>×</button>
+                </div>
+                <div className="p-4 overflow-y-auto space-y-4">
+                  {(() => {
+                    const pv = aiPreviewByAppt[viewingAttentionId] || {};
+                    const hasAny = pv.historyHtml || pv.evolutionHtml || pv.prescriptionHtml || (pv.fields && Object.keys(pv.fields).length);
+                    if (!hasAny) return <div className="text-sm text-gray-500">No hay sugerencias para mostrar.</div>;
+                    const include = aiPreviewIncludeByAppt[viewingAttentionId] || { history: true, evolution: true, prescription: true, fields: true };
+                    const edits = aiPreviewEditsByAppt[viewingAttentionId] || { historyHtml: pv.historyHtml, evolutionHtml: pv.evolutionHtml, prescriptionHtml: pv.prescriptionHtml };
+                    const setEdit = (key, val) => {
+                      setAiPreviewEditsByAppt(prev => ({ ...prev, [viewingAttentionId]: { ...(prev[viewingAttentionId]||{}), [key]: val } }));
+                    };
+                    return (
+                      <>
+                        {pv.historyHtml && (
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="text-xs font-medium text-gray-600">Antecedentes clínicos (propuesta)</div>
+                              <label className="text-xs flex items-center gap-1">
+                                <input type="checkbox" className="rounded" checked={include.history !== false} onChange={(e)=>setAiPreviewIncludeByAppt(prev=>({ ...prev, [viewingAttentionId]: { ...(prev[viewingAttentionId]||{}), history: e.target.checked } }))} /> Incluir
+                              </label>
+                            </div>
+                            <div className="border rounded bg-white">
+                              <ReactQuill theme="snow" value={edits.historyHtml ?? pv.historyHtml} onChange={(html)=>setEdit('historyHtml', html)} />
+                            </div>
+                          </div>
+                        )}
+                        {pv.evolutionHtml && (
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="text-xs font-medium text-gray-600">Evolución (propuesta)</div>
+                              <label className="text-xs flex items-center gap-1">
+                                <input type="checkbox" className="rounded" checked={include.evolution !== false} onChange={(e)=>setAiPreviewIncludeByAppt(prev=>({ ...prev, [viewingAttentionId]: { ...(prev[viewingAttentionId]||{}), evolution: e.target.checked } }))} /> Incluir
+                              </label>
+                            </div>
+                            <div className="border rounded bg-white">
+                              <ReactQuill theme="snow" value={edits.evolutionHtml ?? pv.evolutionHtml} onChange={(html)=>setEdit('evolutionHtml', html)} />
+                            </div>
+                          </div>
+                        )}
+                        {pv.prescriptionHtml && (
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="text-xs font-medium text-gray-600">Prescripción (propuesta)</div>
+                              <label className="text-xs flex items-center gap-1">
+                                <input type="checkbox" className="rounded" checked={include.prescription !== false} onChange={(e)=>setAiPreviewIncludeByAppt(prev=>({ ...prev, [viewingAttentionId]: { ...(prev[viewingAttentionId]||{}), prescription: e.target.checked } }))} /> Incluir
+                              </label>
+                            </div>
+                            <div className="border rounded bg-white">
+                              <ReactQuill theme="snow" value={edits.prescriptionHtml ?? pv.prescriptionHtml} onChange={(html)=>setEdit('prescriptionHtml', html)} />
+                            </div>
+                          </div>
+                        )}
+                        {pv.fields && Object.keys(pv.fields || {}).length > 0 && (
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="text-xs font-medium text-gray-600">Fichas personalizadas (relleno propuesto)</div>
+                              <label className="text-xs flex items-center gap-1">
+                                <input type="checkbox" className="rounded" checked={include.fields !== false} onChange={(e)=>setAiPreviewIncludeByAppt(prev=>({ ...prev, [viewingAttentionId]: { ...(prev[viewingAttentionId]||{}), fields: e.target.checked } }))} /> Incluir
+                              </label>
+                            </div>
+                            <div className="border rounded p-2 bg-gray-50">
+                              {Object.entries(pv.fields).map(([k,v]) => (
+                                <div key={String(k)} className="text-xs text-gray-700"><span className="font-medium">{k}:</span> {Array.isArray(v) ? v.join(', ') : String(v)}</div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+                <div className="px-4 py-3 border-t flex items-center justify-end gap-2">
+                  <button className="btn-secondary" onClick={()=>setShowAiPreview(false)}>Cancelar</button>
+                  <button className="btn-primary" onClick={()=>{
+                    try {
+                      const pv = aiPreviewByAppt[viewingAttentionId] || {};
+                      const include = aiPreviewIncludeByAppt[viewingAttentionId] || { history: true, evolution: true, prescription: true, fields: true };
+                      const edits = aiPreviewEditsByAppt[viewingAttentionId] || {};
+                      if (include.history !== false && pv.historyHtml) {
+                        setHistoryDraft(edits.historyHtml ?? pv.historyHtml);
+                        setShowHistoryEditor(true);
+                      }
+                      if (include.evolution !== false && pv.evolutionHtml) {
+                        setShowEvolEditor(true);
+                        setEvolutionContentByAppt(prev => ({ ...prev, [viewingAttentionId]: (edits.evolutionHtml ?? pv.evolutionHtml) }));
+                      }
+                      if (include.prescription !== false && pv.prescriptionHtml) {
+                        setShowPrescEditor(true);
+                        setPrescriptionsContentByAppt(prev => ({ ...prev, [viewingAttentionId]: (edits.prescriptionHtml ?? pv.prescriptionHtml) }));
+                      }
+                      if (include.fields !== false && pv.fields && Object.keys(pv.fields||{}).length) {
+                        setCustomFormValuesByAppt(prev => ({ ...prev, [viewingAttentionId]: { ...(prev[viewingAttentionId]||{}), ...pv.fields } }));
+                      }
+                      setShowAiPreview(false);
+                      toast.success('Borrador aplicado');
+                    } catch (e) {
+                      console.error('Error aplicando borrador IA', e);
+                      toast.error('No se pudo aplicar el borrador');
+                    }
+                  }}>Aplicar</button>
+                </div>
+              </div>
+            </div>
+          )}
+          {!showAiPanel && (
+            <>
+              <div className="fixed bottom-4 right-4 z-40 flex flex-col items-end gap-1">
+                <div className="relative w-12 h-12 mb-2">
+                  {showAudioMenu && (
+                    <div className="absolute inset-0">
+                      {/* Input oculto para adjuntar audio */}
+                      <input
+                        ref={attachAudioInputRef}
+                        type="file"
+                        accept="audio/*,video/webm,.webm"
+                        className="hidden"
+                        onChange={handleAudioFileSelected}
+                      />
+                      <style>{`
+                        .stack-btn { width: 44px; height: 44px; border-radius: 9999px; box-shadow: 0 2px 6px rgba(0,0,0,.15); display: flex; align-items: center; justify-content: center; font-size: 16px; }
+                        .stack-item { position:absolute; left:50%; top:50%; transform-origin: 50% 50%; transform: translate(-50%, calc(-50% + var(--ty,0))) scale(1); opacity: 0; }
+                        @keyframes stackIn { from { opacity: 0; transform: translate(-50%, calc(-50% + var(--ty,0))) scale(.85);} to { opacity:1; transform: translate(-50%, calc(-50% + var(--ty,0))) scale(1);} }
+                      `}</style>
+                      {getAudioArcButtons().map((b, idx, arr) => {
+                        const spacing = 52; // separación vertical fija
+                        const ty = -(idx + 1) * spacing; // hacia arriba en línea recta
+
+                        let classes = 'stack-item stack-btn ';
+                        if (b.key === 'start') classes += 'bg-black text-white';
+                        else if (b.key === 'attach') classes += 'bg-white text-gray-800 border border-gray-300 hover:bg-gray-50';
+                        else if (b.key === 'send') {
+                          const canSendNowBtn = hasLastAudio || isRecordingAudio;
+                          classes += `bg-green-600 hover:bg-green-700 text-white ${canSendNowBtn ? '' : 'opacity-50 cursor-not-allowed'}`;
+                        }
+                        else if (b.key === 'pause') classes += 'bg-yellow-500 hover:bg-yellow-600 text-white';
+                        else if (b.key === 'stop') classes += 'bg-red-600 hover:bg-red-700 text-white';
+                        else classes += 'bg-white text-gray-800 border border-gray-300 hover:bg-gray-50';
+                        if (b.disabled) classes += ' opacity-60';
+
+                        return (
+                          <button
+                            key={b.key}
+                            type="button"
+                            className={classes}
+                            style={{ '--ty': `${ty}px`, animation: `stackIn 160ms ease-out ${idx*50}ms forwards` }}
+                            onClick={(e)=>{
+                              if (b.key === 'send') {
+                                const canSendNowBtn = hasLastAudio || isRecordingAudio;
+                                if (!canSendNowBtn || uploadingAudio) { e.preventDefault(); return; }
+                                sendLastAudio();
+                                return;
+                              }
+                              if (b.key === 'attach') {
+                                handleAttachClick();
+                                return;
+                              }
+                              b.onClick();
+                            }}
+                            disabled={!!b.disabled || (b.key === 'send' && (!(hasLastAudio || isRecordingAudio) || uploadingAudio))}
+                            title={b.title}
+                            aria-label={b.title}
+                          >
+                            {b.key === 'start' ? (
+                              <span className="relative flex items-center justify-center">
+                                <span className="bg-red-500 rounded-full animate-ping absolute opacity-75" style={{ width: '14px', height: '14px' }}></span>
+                                <span className="bg-red-600 rounded-full relative" style={{ width: '12px', height: '12px' }}></span>
+                              </span>
+                            ) : b.key === 'test' ? (
+                              <span className="relative flex items-end justify-center" style={{ width: '28px', height: '18px' }}>
+                                {[0,1,2,3,4].map(i => {
+                                  const scale = [0.5, 0.75, 1, 0.75, 0.5][i];
+                                  const h = Math.max(2, Math.floor(micLevel * 18 * scale));
+                                  return (
+                                    <span key={i} className={`mx-[1px] ${micTestActive ? 'bg-black' : 'bg-gray-400'} rounded`} style={{ width: '3px', height: `${h}px`, transition: 'height 90ms linear' }}></span>
+                                  );
+                                })}
+                                {micTestActive && (() => {
+                                  const pct = Math.max(0, Math.min(1, (5000 - micTestRemainingMs) / 5000));
+                                  return (
+                                    <span className="absolute -top-5 left-1/2 -translate-x-1/2">
+                                      <span className="block text-[10px] leading-none text-white px-2 py-0.5 rounded-full shadow" style={{ background: 'linear-gradient(135deg, rgba(0,0,0,.85), rgba(0,0,0,.6))', border: '1px solid rgba(255,255,255,.15)' }}>
+                                        {Math.ceil(micTestRemainingMs/1000)}s
+                                      </span>
+                                    </span>
+                                  );
+                                })()}
+                              </span>
+                            ) : (
+                              b.label
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="absolute inset-0 w-12 h-12 rounded-full shadow bg-gray-700 hover:bg-gray-800 text-white flex items-center justify-center"
+                    onClick={()=>setShowAudioMenu(v=>!v)}
+                    title="Opciones de audio"
+                    aria-label="Opciones de audio"
+                  >
+                    {isRecordingAudio ? (
+                      <span className="relative flex items-center justify-center">
+                        <span className="bg-red-500 rounded-full animate-ping absolute opacity-75" style={{ width: '16px', height: '16px' }}></span>
+                        <span className="bg-red-600 rounded-full relative" style={{ width: '14px', height: '14px' }}></span>
+                        <span className="absolute -left-16 top-1/2 -translate-y-1/2 text-xs bg-black/70 text-white px-2 py-0.5 rounded">
+                          {formatDuration(recordElapsedMs)}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="bg-gray-300 rounded-full" style={{ width: '10px', height: '10px' }}></span>
+                    )}
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="w-12 h-12 rounded-full shadow-lg bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center"
+                  onClick={()=>setShowAiPanel(true)}
+                  title="Abrir asistente de IA"
+                  aria-label="Abrir asistente de IA"
+                >
+                  <span className="text-xs font-semibold">IA</span>
+                </button>
+                <button
+                  type="button"
+                  className="w-12 h-12 rounded-full shadow-lg bg-gray-600 hover:bg-gray-700 text-white flex items-center justify-center"
+                  onClick={()=>setShowNotesPanel(true)}
+                  title="Abrir notas"
+                  aria-label="Abrir notas"
+                >
+                  <span className="text-lg" aria-hidden>📝</span>
+                </button>
+              </div>
+            </>
+          )}
 
           {/* Caja de Fichas Personalizadas por Especialidad - fuera de la primera tarjeta */}
           <div className="card">
@@ -1269,9 +2744,38 @@ const PatientFicha = () => {
                   <select
                     className="input-field"
                     value={selectedCustomFormIdByAppt[viewingAttentionId] || ''}
-                    onChange={(e)=>{
+                    onChange={async (e)=>{
                       const formId = e.target.value ? parseInt(e.target.value) : '';
                       setSelectedCustomFormIdByAppt(prev => ({ ...prev, [viewingAttentionId]: formId }));
+                      try {
+                        if (!viewingAttentionId || !formId) return;
+                        const appt = attentions.find(a=>a.id===viewingAttentionId);
+                        await ensureSpecialtiesLoaded();
+                        let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                        if (!specId) {
+                          const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                          const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                          specId = spec?.id || null;
+                        }
+                        if (!specId) return;
+                        const values = customFormValuesByAppt[viewingAttentionId] || {};
+                        const payload = { specialtyId: specId, formId, values };
+                        await appointmentsAPI.saveCustomForm(viewingAttentionId, payload);
+                        // Refrescar valores guardados por si existen previos en backend
+                        try {
+                          const latest = await appointmentsAPI.getCustomForms(viewingAttentionId);
+                          const items = latest.data?.forms || latest.forms || [];
+                          const found = items.find(it => String(it.form_id) === String(formId));
+                          if (found) {
+                            const parsed = typeof found.values === 'string' ? (function(){ try { return JSON.parse(found.values); } catch(_) { return {}; } })() : (found.values || {});
+                            setCustomFormValuesByAppt(prev => ({ ...prev, [viewingAttentionId]: parsed }));
+                          }
+                        } catch (_) {}
+                        toast.success('Ficha seleccionada guardada');
+                      } catch (eSel) {
+                        console.error('Error guardando ficha seleccionada:', eSel);
+                        toast.error('No se pudo guardar la ficha seleccionada');
+                      }
                     }}
                     onFocus={async ()=>{
                       const appt = attentions.find(a=>a.id===viewingAttentionId);
@@ -1288,7 +2792,18 @@ const PatientFicha = () => {
                         try {
                           setLoadingCustomForms(true);
                           const resp = await specialtiesAPI.getTemplates(specId, 'customForms');
-                          const forms = (resp.data?.templates || []).map(t => ({ id: t.id, name: t.name, fields: t.content || [], isDefault: !!t.is_default, isActive: !!t.is_active }));
+                          const forms = (resp.data?.templates || []).map(t => {
+                            const fieldsRaw = (t.content !== undefined ? t.content : (t.fields !== undefined ? t.fields : []));
+                            let fields = [];
+                            if (typeof fieldsRaw === 'string') {
+                              try { fields = JSON.parse(fieldsRaw); } catch (_) { fields = []; }
+                            } else if (Array.isArray(fieldsRaw)) {
+                              fields = fieldsRaw;
+                            } else {
+                              fields = [];
+                            }
+                            return { id: t.id, name: t.name, fields, isDefault: !!t.is_default, isActive: !!t.is_active };
+                          });
                           setCustomFormsCache(prev => ({ ...prev, [cacheKey]: forms }));
                           if (forms.length && !selectedCustomFormIdByAppt[viewingAttentionId]) {
                             const def = forms.find(f=>f.isDefault) || forms[0];
@@ -1313,9 +2828,27 @@ const PatientFicha = () => {
                         specId = spec?.id || null;
                       }
                       const forms = customFormsCache[String(specId)] || [];
-                      return forms.map(f => (
-                      <option key={f.id} value={f.id}>{f.name}</option>
-                      ));
+                      const selectedId = selectedCustomFormIdByAppt[viewingAttentionId];
+                      let exists = forms.some(f => String(f.id) === String(selectedId));
+                      // Si no existe en la especialidad actual, intentar mostrar el nombre buscándolo en otras especialidades cargadas
+                      let savedLabel = 'Ficha guardada';
+                      if (!exists && selectedId) {
+                        for (const key of Object.keys(customFormsCache)) {
+                          const arr = customFormsCache[key] || [];
+                          const m = arr.find(f => String(f.id) === String(selectedId));
+                          if (m) { savedLabel = m.name || savedLabel; exists = true; break; }
+                        }
+                      }
+                      const opts = [];
+                      if (!exists && selectedId) {
+                        opts.push(<option key={`saved-${selectedId}`} value={selectedId}>{savedLabel}</option>);
+                      }
+                      return [
+                        ...opts,
+                        ...forms.map(f => (
+                          <option key={f.id} value={f.id}>{f.name}</option>
+                        ))
+                      ];
                     })()}
                   </select>
                 </div>
@@ -1340,17 +2873,17 @@ const PatientFicha = () => {
                         }
                         const values = customFormValuesByAppt[viewingAttentionId] || {};
                         const payload = { specialtyId: specId, formId, values };
-                        // Guardar ficha en endpoint dedicado
-                        const saveResp = await fetch(`/api/appointments/${viewingAttentionId}/custom-forms`, {
-                          method: 'PUT',
-                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('authToken')||''}` },
-                          body: JSON.stringify(payload)
-                        });
-                        if (!saveResp.ok) {
-                          let err = {};
-                          try { err = await saveResp.json(); } catch {}
-                          throw new Error(err.message || err.error || 'No se pudo guardar la ficha');
-                        }
+                        const saved = await appointmentsAPI.saveCustomForm(viewingAttentionId, payload);
+                        // Refrescar estado local con la última versión guardada
+                        try {
+                          const latest = await appointmentsAPI.getCustomForms(viewingAttentionId);
+                          const items = latest.data?.forms || latest.forms || [];
+                          const found = items.find(it => String(it.form_id) === String(formId));
+                          if (found) {
+                            const parsed = typeof found.values === 'string' ? (function(){ try { return JSON.parse(found.values); } catch(_) { return {}; } })() : (found.values || {});
+                            setCustomFormValuesByAppt(prev => ({ ...prev, [viewingAttentionId]: parsed }));
+                          }
+                        } catch (_) {}
                         toast.success('Ficha personalizada guardada');
                       } catch (e) {
                         console.error('Error guardando ficha personalizada:', e);
@@ -1372,9 +2905,17 @@ const PatientFicha = () => {
                   const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
                   specId = spec?.id || null;
                 }
-                const forms = customFormsCache[String(specId)] || [];
+                let forms = customFormsCache[String(specId)] || [];
                 const selectedId = selectedCustomFormIdByAppt[viewingAttentionId];
-                const form = forms.find(f => f.id === selectedId);
+                let form = forms.find(f => f.id === selectedId);
+                if (!form && selectedId) {
+                  // Buscar en otras especialidades ya cacheadas
+                  for (const key of Object.keys(customFormsCache)) {
+                    const arr = customFormsCache[key] || [];
+                    const match = arr.find(f => String(f.id) === String(selectedId));
+                    if (match) { form = match; break; }
+                  }
+                }
                 if (!form) return null;
                 const values = customFormValuesByAppt[viewingAttentionId] || {};
                 const updateValue = (name, value) => {
@@ -1385,6 +2926,31 @@ const PatientFicha = () => {
                       [name]: value
                     }
                   }));
+                  // Auto-guardar con debounce
+                  try {
+                    if (customFormSaveTimersRef.current[viewingAttentionId]) {
+                      clearTimeout(customFormSaveTimersRef.current[viewingAttentionId]);
+                    }
+                    customFormSaveTimersRef.current[viewingAttentionId] = setTimeout(async () => {
+                      try {
+                        const appt = attentions.find(a=>a.id===viewingAttentionId);
+                        await ensureSpecialtiesLoaded();
+                        let specId = appointmentDetails[viewingAttentionId]?.specialty_id || appt?.specialty_id || appt?.specialtyId || null;
+                        if (!specId) {
+                          const specialtyName = appointmentDetails[viewingAttentionId]?.specialty_name || appt?.specialty || '';
+                          const spec = specialties.find(s => String(s.name || '').toLowerCase().trim() === String(specialtyName || '').toLowerCase().trim());
+                          specId = spec?.id || null;
+                        }
+                        const formId = selectedCustomFormIdByAppt[viewingAttentionId];
+                        if (!viewingAttentionId || !specId || !formId) return;
+                        const valuesLatest = (prev => ({ ...prev, [name]: value }))(customFormValuesByAppt[viewingAttentionId] || {});
+                        const payload = { specialtyId: specId, formId, values: valuesLatest };
+                        await appointmentsAPI.saveCustomForm(viewingAttentionId, payload);
+                      } catch (e) {
+                        console.warn('Auto-guardar ficha falló:', e);
+                      }
+                    }, 600);
+                  } catch (_) {}
                 };
 
                 return (
@@ -1522,45 +3088,26 @@ const PatientFicha = () => {
                       ) : (
                         <>
                           <div className="flex flex-wrap items-center gap-2 mb-2">
-                            <label className="text-sm text-gray-600">Especialidad:</label>
-                            <select
-                              className="form-select text-sm"
-                              value={evolutionSpecIdByAppt[viewingAttentionId] || ''}
-                              onChange={(e)=>{
-                                const newSpecId = e.target.value ? parseInt(e.target.value) : null;
-                                if (newSpecId) {
-                                  const appt = attentions.find(a => a.id === viewingAttentionId);
-                                  loadEvolutionTemplatesFor(appt, newSpecId);
-                                } else {
-                                  setEvolutionTemplates([]);
-                                  setSelectedEvolutionTemplateId(null);
-                                }
-                              }}
-                            >
-                              <option value="">(Seleccionar)</option>
-                              {specialties.map(s => (
-                                <option key={s.id} value={s.id}>{s.name}</option>
-                              ))}
-                            </select>
                             <label className="text-sm text-gray-600">Plantilla:</label>
-                            <select
-                              className="form-select text-sm"
-                              value={selectedEvolutionTemplateId || ''}
-                              onChange={(e)=>{
-                                const id = e.target.value || null;
-                                setSelectedEvolutionTemplateId(id);
-                                const tpl = evolutionTemplates.find(t => String(t.id) === String(id));
-                                if (tpl) {
-                                  setEvolutionContentByAppt(prev => ({ ...prev, [viewingAttentionId]: tpl.content || '' }));
-                                }
-                              }}
-                              disabled={loadingEvolutionTemplates || (evolutionTemplates||[]).length===0}
-                            >
-                              <option value="">{loadingEvolutionTemplates ? 'Cargando...' : 'Sin plantilla'}</option>
-                              {(evolutionTemplates||[]).map(t => (
-                                <option key={t.id} value={t.id}>{t.name}{(t.is_default||t.isDefault)?' (predeterminada)':''}</option>
-                              ))}
-                            </select>
+                            <div className="min-w-[260px]">
+                              <OverlaySelect
+                                name="evolutionTemplate"
+                                value={selectedEvolutionTemplateId || ''}
+                                options={[
+                                  { value: '', label: loadingEvolutionTemplates ? 'Cargando...' : 'Sin plantilla' },
+                                  ...((evolutionTemplates||[]).map(t => ({ value: t.id, label: `${t.name}${(t.is_default||t.isDefault)?' (predeterminada)':''}` })))
+                                ]}
+                                onChange={(id)=>{
+                                  const val = id || null;
+                                  setSelectedEvolutionTemplateId(val);
+                                  const tpl = (evolutionTemplates||[]).find(t => String(t.id) === String(val));
+                                  if (tpl) {
+                                    setEvolutionContentByAppt(prev => ({ ...prev, [viewingAttentionId]: tpl.content || '' }));
+                                  }
+                                }}
+                                className="input-field"
+                              />
+                            </div>
                             <button
                               type="button"
                               className="btn-secondary text-xs"
@@ -1571,6 +3118,14 @@ const PatientFicha = () => {
                               disabled={!selectedEvolutionTemplateId}
                             >
                               Insertar plantilla
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-secondary text-xs"
+                              onClick={()=>sendAiPrompt(viewingAttentionId,'evolution','')}
+                              disabled={!!aiLoadingByAppt[viewingAttentionId]}
+                            >
+                              Sugerir con IA
                             </button>
                             <button
                               type="button"
@@ -1634,7 +3189,7 @@ const PatientFicha = () => {
                       <div className="flex flex-wrap items-end gap-3">
                         <div>
                           <label className="form-label text-sm">Producto</label>
-                          <select className="form-select text-sm" value={selectedProductId} onChange={(e)=>setSelectedProductId(e.target.value)}>
+                          <select className="input-field text-sm" value={selectedProductId} onChange={(e)=>setSelectedProductId(e.target.value)}>
                             <option value="">Seleccione</option>
                             {availableProducts.map(p => (
                               <option key={p.id} value={p.id}>{p.name}</option>
@@ -1656,7 +3211,7 @@ const PatientFicha = () => {
                       <div className="flex items-end gap-3">
                         <div>
                           <label className="form-label text-sm">Paquete</label>
-                          <select className="form-select text-sm" value={selectedPackageId} onChange={(e)=>setSelectedPackageId(e.target.value)}>
+                          <select className="input-field text-sm" value={selectedPackageId} onChange={(e)=>setSelectedPackageId(e.target.value)}>
                             <option value="">Seleccione</option>
                             {availablePackages.map(p => (
                               <option key={p.id} value={p.id}>{p.name}</option>
@@ -1775,45 +3330,26 @@ const PatientFicha = () => {
                       ) : (
                         <>
                           <div className="flex flex-wrap items-center gap-2 mb-2">
-                            <label className="text-sm text-gray-600">Especialidad:</label>
-                            <select
-                              className="form-select text-sm"
-                              value={prescriptionsSpecIdByAppt[viewingAttentionId] || ''}
-                              onChange={(e)=>{
-                                const newSpecId = e.target.value ? parseInt(e.target.value) : null;
-                                if (newSpecId) {
-                                  const appt = attentions.find(a => a.id === viewingAttentionId);
-                                  loadPrescriptionsTemplatesFor(appt, newSpecId);
-                                } else {
-                                  setPrescriptionsTemplates([]);
-                                  setSelectedPrescriptionsTemplateId(null);
-                                }
-                              }}
-                            >
-                              <option value="">(Seleccionar)</option>
-                              {specialties.map(s => (
-                                <option key={s.id} value={s.id}>{s.name}</option>
-                              ))}
-                            </select>
                             <label className="text-sm text-gray-600">Plantilla:</label>
-                            <select
-                              className="form-select text-sm"
-                              value={selectedPrescriptionsTemplateId || ''}
-                              onChange={(e)=>{
-                                const id = e.target.value || null;
-                                setSelectedPrescriptionsTemplateId(id);
-                                const tpl = prescriptionsTemplates.find(t => String(t.id) === String(id));
-                                if (tpl) {
-                                  setPrescriptionsContentByAppt(prev => ({ ...prev, [viewingAttentionId]: tpl.content || '' }));
-                                }
-                              }}
-                              disabled={loadingPrescriptionsTemplates || (prescriptionsTemplates||[]).length===0}
-                            >
-                              <option value="">{loadingPrescriptionsTemplates ? 'Cargando...' : 'Sin plantilla'}</option>
-                              {(prescriptionsTemplates||[]).map(t => (
-                                <option key={t.id} value={t.id}>{t.name}{(t.is_default||t.isDefault)?' (predeterminada)':''}</option>
-                              ))}
-                            </select>
+                            <div className="min-w-[260px]">
+                              <OverlaySelect
+                                name="prescriptionTemplate"
+                                value={selectedPrescriptionsTemplateId || ''}
+                                options={[
+                                  { value: '', label: loadingPrescriptionsTemplates ? 'Cargando...' : 'Sin plantilla' },
+                                  ...((prescriptionsTemplates||[]).map(t => ({ value: t.id, label: `${t.name}${(t.is_default||t.isDefault)?' (predeterminada)':''}` })))
+                                ]}
+                                onChange={(id)=>{
+                                  const val = id || null;
+                                  setSelectedPrescriptionsTemplateId(val);
+                                  const tpl = (prescriptionsTemplates||[]).find(t => String(t.id) === String(val));
+                                  if (tpl) {
+                                    setPrescriptionsContentByAppt(prev => ({ ...prev, [viewingAttentionId]: tpl.content || '' }));
+                                  }
+                                }}
+                                className="input-field"
+                              />
+                            </div>
                             <button
                               type="button"
                               className="btn-secondary text-xs"
@@ -1824,6 +3360,14 @@ const PatientFicha = () => {
                               disabled={!selectedPrescriptionsTemplateId}
                             >
                               Insertar plantilla
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-secondary text-xs"
+                              onClick={()=>sendAiPrompt(viewingAttentionId,'prescription','')}
+                              disabled={!!aiLoadingByAppt[viewingAttentionId]}
+                            >
+                              Sugerir con IA
                             </button>
                             <button
                               type="button"
@@ -1873,22 +3417,23 @@ const PatientFicha = () => {
                         <>
                           <div className="flex flex-wrap items-center gap-2 mb-2">
                             <label className="text-sm text-gray-600">Plantilla:</label>
-                            <select
-                              className="form-select text-sm"
-                              value={selectedConsentTemplateId || ''}
-                              onChange={(e)=>{
-                                const id = e.target.value || null;
-                                setSelectedConsentTemplateId(id);
-                                const tpl = consentsTemplates.find(t => String(t.id) === String(id));
-                                if (tpl) setConsentsContentByAppt(prev => ({ ...prev, [viewingAttentionId]: tpl.content || '' }));
-                              }}
-                              disabled={loadingConsentsTemplates || (consentsTemplates||[]).length===0}
-                            >
-                              <option value="">{loadingConsentsTemplates ? 'Cargando...' : 'Sin plantilla'}</option>
-                              {(consentsTemplates||[]).map(t => (
-                                <option key={t.id} value={t.id}>{t.name}{(t.is_default||t.isDefault)?' (predeterminada)':''}</option>
-                              ))}
-                            </select>
+                            <div className="min-w-[260px]">
+                              <OverlaySelect
+                                name="consentTemplate"
+                                value={selectedConsentTemplateId || ''}
+                                options={[
+                                  { value: '', label: loadingConsentsTemplates ? 'Cargando...' : 'Sin plantilla' },
+                                  ...((consentsTemplates||[]).map(t => ({ value: t.id, label: `${t.name}${(t.is_default||t.isDefault)?' (predeterminada)':''}` })))
+                                ]}
+                                onChange={(id)=>{
+                                  const val = id || null;
+                                  setSelectedConsentTemplateId(val);
+                                  const tpl = (consentsTemplates||[]).find(t => String(t.id) === String(val));
+                                  if (tpl) setConsentsContentByAppt(prev => ({ ...prev, [viewingAttentionId]: tpl.content || '' }));
+                                }}
+                                className="input-field"
+                              />
+                            </div>
                             <button
                               type="button"
                               className="btn-secondary text-xs"
@@ -1929,11 +3474,51 @@ const PatientFicha = () => {
                         </>
                       )}
                     </div>
+                  ) : sec.key === 'clinicalDocs' ? (
+                    <ImagesDocsSection
+                      patientId={patientId}
+                      appointmentId={viewingAttentionId}
+                      onlyDocuments={true}
+                    />
                   ) : sec.key === 'imagesDocs' ? (
                     <ImagesDocsSection
                       patientId={patientId}
                       appointmentId={viewingAttentionId}
                     />
+                  ) : sec.key === 'cie' ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm text-gray-600">Diagnósticos CIE asociados a esta atención</div>
+                        <button type="button" className="btn-secondary text-sm" onClick={()=>openRipsDetails(viewingAttentionId)}>+ Añadir desde RIPS</button>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-gray-600">
+                              <th className="py-2 pr-4">Versión</th>
+                              <th className="py-2 pr-4">Código</th>
+                              <th className="py-2 pr-4">Nombre</th>
+                              <th className="py-2 pr-4">Creado por</th>
+                              <th className="py-2 pr-4">Fecha creación</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(cieDocsByAppt[viewingAttentionId] || []).map((d, idx) => (
+                              <tr key={idx} className="border-t">
+                                <td className="py-2 pr-4"><span className="px-2 py-0.5 rounded bg-gray-100 border text-gray-800">{d.version || 'CIE-10'}</span></td>
+                                <td className="py-2 pr-4">{d.code}</td>
+                                <td className="py-2 pr-4">{d.name}</td>
+                                <td className="py-2 pr-4">{d.createdBy}</td>
+                                <td className="py-2 pr-4">{d.createdAt}</td>
+                              </tr>
+                            ))}
+                            {!(cieDocsByAppt[viewingAttentionId] || []).length && (
+                              <tr><td className="py-3 text-gray-500" colSpan={5}>Sin diagnósticos registrados</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   ) : (
                     <div className="p-4 bg-gray-50 rounded-md text-sm text-gray-500">
                       No hay datos en esta sección.
@@ -2155,10 +3740,87 @@ const PatientFicha = () => {
           onSave={(data) => {
             if (ripsForAttentionId) {
               setRipsDetailsByAppt(prev => ({ ...prev, [ripsForAttentionId]: data }));
+              // Persistir Documentos CIE en backend y refrescar lista
+              (async () => {
+                try {
+                  const appt = attentions.find(a=>a.id===ripsForAttentionId);
+                  const patientIdNum = parseInt(patientId);
+                  const codes = [
+                    data.diagnosticoPrincipal,
+                    data.diagnosticoSecundario1,
+                    data.diagnosticoSecundario2,
+                    data.diagnosticoSecundario3
+                  ].filter(Boolean);
+                  if (patientIdNum && codes.length) {
+                    const labelsMap = data._labelsMap || {};
+                    const items = codes.map(code => ({
+                      version: 'CIE-10',
+                      code,
+                      name: (labelsMap[code] && labelsMap[code].includes(' - ')) ? labelsMap[code].split(' - ').slice(1).join(' - ') : (labelsMap[code] || code)
+                    }));
+                    await cieDocsAPI.create({ patientId: patientIdNum, appointmentId: appt?.id, items });
+                    // recargar desde API para mostrar con nombre de creador/fecha BD
+                    const resp = await cieDocsAPI.listByAppointment(appt?.id);
+                    const list = resp?.data?.items || resp?.items || [];
+                    setCieDocsByAppt(prev => ({ ...prev, [appt.id]: list.map(it => ({
+                      version: it.version || 'CIE-10',
+                      code: it.code,
+                      name: it.name,
+                      createdBy: it.createdBy || (currentUser?.name || 'Usuario'),
+                      createdAt: new Date(it.createdAt).toLocaleString()
+                    })) }));
+                  }
+                } catch (e) {
+                  console.error('Error guardando/listando CIE docs:', e);
+                  toast.error('No se pudieron guardar los diagnósticos CIE');
+                }
+              })();
             }
           }}
           initialValues={ripsDetailsByAppt[ripsForAttentionId] || {}}
         />
+      )}
+
+      {showSummaryModal && (
+        <div className="modal-overlay">
+          <div className="modal shadow-xl" style={{ maxWidth: '960px', borderRadius: '12px', padding: '20px' }}>
+            <div className="flex items-center justify-between mb-4 border-b border-gray-200 pb-3">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center">ℹ️</div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 tracking-tight">Resumen clínico del paciente</h3>
+                  <div className="text-xs text-gray-500">Vista general de historia, atenciones y hallazgos</div>
+                </div>
+              </div>
+              <div>
+                <button type="button" className="text-gray-400 hover:text-gray-600" onClick={()=>setShowSummaryModal(false)} aria-label="Cerrar">✕</button>
+              </div>
+            </div>
+            <div className="mt-2 bg-white rounded-xl p-6 border border-gray-200" style={{ maxHeight: '65vh', overflowY: 'auto' }}>
+              <div className="prose max-w-none text-gray-800">
+                {summaryContent ? (
+                  <div dangerouslySetInnerHTML={{ __html: (function(){
+                    try {
+                      const md = summaryContent
+                        .replace(/^###\s(.+)$/gm, '<h3 class=\'text-base font-semibold text-gray-900 mt-4\'>$1<\/h3>')
+                        .replace(/^##\s(.+)$/gm, '<h2 class=\'text-lg font-semibold text-gray-900 mt-5\'>$1<\/h2>')
+                        .replace(/^#\s(.+)$/gm, '<h1 class=\'text-xl font-semibold text-gray-900 mt-6\'>$1<\/h1>')
+                        .replace(/\*\*(.+?)\*\*/g, '<strong class=\'text-gray-900\'>$1<\/strong>')
+                        .replace(/\n-\s(.+)/g, '<div class=\'pl-3 relative\'><span class=\'absolute -ml-3 text-blue-500\'>•<\/span> $1<\/div>')
+                        .replace(/\n/g, '<br/>' );
+                      return md;
+                    } catch (_) { return summaryContent; }
+                  })() }} />
+                ) : (
+                  <div className="text-sm text-gray-500">Sin contenido para mostrar.</div>
+                )}
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button type="button" className="btn-primary" onClick={()=>setShowSummaryModal(false)}>Cerrar</button>
+            </div>
+          </div>
+        </div>
       )}
 
       

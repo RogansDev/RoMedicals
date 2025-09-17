@@ -87,7 +87,7 @@ router.post('/image', authenticateToken, upload.single('image'), async (req, res
       });
     }
 
-    const { patientId, appointmentId, type = 'general' } = req.body;
+    const { patientId, appointmentId, type = 'general', uploadType } = req.body;
     
     // Generar nombre único para el archivo (convertimos a JPG)
     const filename = `${uuidv4()}.jpg`;
@@ -110,7 +110,7 @@ router.post('/image', authenticateToken, upload.single('image'), async (req, res
         req.file.size,
         patientId || null,
         req.user.id,
-        type,
+        uploadType || type,
         appointmentId ? parseInt(appointmentId) : null
       ]
     );
@@ -151,7 +151,7 @@ router.post('/document', authenticateToken, upload.single('document'), async (re
       });
     }
 
-    const { patientId, appointmentId, type = 'general' } = req.body;
+    const { patientId, appointmentId, type = 'general', uploadType } = req.body;
     
     // Generar nombre único para el archivo manteniendo extensión original
     const fileExtension = path.extname(req.file.originalname) || '.bin';
@@ -175,7 +175,7 @@ router.post('/document', authenticateToken, upload.single('document'), async (re
         req.file.size,
         patientId || null,
         req.user.id,
-        type,
+        uploadType || type,
         appointmentId ? parseInt(appointmentId) : null
       ]
     );
@@ -216,7 +216,7 @@ router.post('/multiple', authenticateToken, upload.array('files', 10), async (re
       });
     }
 
-    const { patientId, appointmentId, type = 'general' } = req.body;
+    const { patientId, appointmentId, type = 'general', uploadType } = req.body;
     const uploads = [];
 
     for (const file of req.files) {
@@ -253,7 +253,7 @@ router.post('/multiple', authenticateToken, upload.array('files', 10), async (re
             file.size,
             patientId || null,
             req.user.id,
-            type,
+            uploadType || type,
             appointmentId ? parseInt(appointmentId) : null
           ]
         );

@@ -90,6 +90,9 @@ export const appointmentsAPI = {
   update: (id, data) => api.put(`/appointments/${id}`, data),
   updateStatus: (id, status) => api.patch(`/appointments/${id}/status`, { status }),
   delete: (id) => api.delete(`/appointments/${id}`),
+  // Custom forms por atención
+  getCustomForms: (id) => api.get(`/appointments/${id}/custom-forms`),
+  saveCustomForm: (id, payload) => api.put(`/appointments/${id}/custom-forms`, payload),
 };
 
 // Funciones de notas clínicas
@@ -176,6 +179,18 @@ export const ripsAPI = {
   delete: (id) => api.delete(`/rips/${id}`),
   export: (params) => api.get('/rips/export', { params }),
   getStatistics: (params) => api.get('/rips/statistics/summary', { params }),
+};
+
+// Documentos CIE
+export const cieDocsAPI = {
+  create: (payload) => api.post('/cie-docs', payload),
+  listByAppointment: (appointmentId) => api.get(`/cie-docs/by-appointment/${appointmentId}`),
+};
+
+// Funciones de asistente de IA
+export const aiAPI = {
+  // Endpoint genérico de asistencia. El backend debe integrar OpenAI u otro LLM.
+  assist: (payload, options = {}) => api.post('/ai/assistant', payload, options),
 };
 
 // Funciones de usuarios
