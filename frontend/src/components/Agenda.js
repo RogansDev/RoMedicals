@@ -619,8 +619,9 @@ const Agenda = () => {
                     
                     <div className="flex space-x-1">
                       <Link
-                        to={`/patients/${appointment.patient.id}/ficha`}
+                        to={`/patients/${appointment.patient.id}/ficha?tab=clinical&appointmentId=${appointment.id}`}
                         className="btn-primary text-xs px-3 py-1"
+                        title="Abrir ficha en la atención seleccionada"
                       >
                         <span style={{ fontSize: '12px', marginRight: '4px' }}>👤</span>
                         Ficha

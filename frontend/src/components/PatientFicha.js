@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import patientService from '../services/patientService';
 import appointmentService from '../services/appointmentService';
 import userService from '../services/userService';
-import { specialtiesAPI, consentsAPI, aiAPI, appointmentsAPI, authAPI, cieDocsAPI } from '../config/api';
+import { specialtiesAPI, consentsAPI, aiAPI, appointmentsAPI, authAPI, cieDocsAPI, clinicalNotesAPI } from '../config/api';
 import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
 import ImagesDocsSection from './ImagesDocsSection';
@@ -58,6 +58,12 @@ const PatientFicha = () => {
   const [medicalOrdersByAppt, setMedicalOrdersByAppt] = useState({}); // appointmentId -> [{id,name,quantity,concentration}]
   const [selectedProductId, setSelectedProductId] = useState('');
   const [productQty, setProductQty] = useState(1);
+  // Edición de datos administrativos
+  const [isEditingAdmin, setIsEditingAdmin] = useState(false);
+  const [adminForm, setAdminForm] = useState(null);
+  const [savingAdmin, setSavingAdmin] = useState(false);
+  const monthNameFromIndex = (idx) => ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'][idx] || 'Enero';
+  const adminAutoEditAppliedRef = useRef(false);
   const [productConc, setProductConc] = useState('');
   // Fichas personalizadas por especialidad
   const [customFormsCache, setCustomFormsCache] = useState({}); // specialtyId -> [{id,name,fields,isDefault,isActive}]
@@ -117,6 +123,9 @@ const PatientFicha = () => {
   const micRAFRef = useRef(null);
   const [micTestRemainingMs, setMicTestRemainingMs] = useState(0);
   const micTestEndRef = useRef(0);
+  // Toast y estado de aplicación de respuesta del webhook
+  const audioProcessToastIdRef = useRef(null);
+  const webhookAppliedRef = useRef(false);
   // Envío automático al detener
   const pendingAutoSendRef = useRef(false);
   // Estado reactivo para indicar si hay un audio listo para enviar
@@ -230,7 +239,7 @@ const PatientFicha = () => {
             const payload = { specialtyId: specId, formId: selectedId, values: currentValues };
             await appointmentsAPI.saveCustomForm(apptId, payload);
           }
-          toast.success('Ficha autocompletada con la respuesta del webhook');
+          webhookAppliedRef.current = true;
         } catch (e) {
           console.warn('Error guardando autollenado de ficha:', e);
         }
@@ -258,6 +267,51 @@ const PatientFicha = () => {
       }
     })();
   }, []);
+
+  // Al tener patient cargado y ?edit=admin, inicializar modo edición automáticamente
+  useEffect(() => {
+    if (!patient) return;
+    const editParam = (searchParams.get('edit') || '').toLowerCase();
+    if (editParam === 'admin' && !adminAutoEditAppliedRef.current) {
+      adminAutoEditAppliedRef.current = true;
+      setActiveTab('administrative');
+      setIsEditingAdmin(true);
+      setAdminForm({
+        firstName: patient.first_name || '',
+        lastName: patient.last_name || '',
+        identificationType: patient.identification_type || '',
+        identificationNumber: patient.identification_number || '',
+        gender: patient.gender || '',
+        bloodType: patient.blood_type || '',
+        occupation: patient.occupation || '',
+        maritalStatus: patient.marital_status || '',
+        mobilePhoneCountry: patient.mobile_phone_country || '+57',
+        mobilePhone: patient.mobile_phone || '',
+        landlinePhone: patient.landline_phone || '',
+        email: patient.email || '',
+        address: patient.address || '',
+        city: patient.city || '',
+        department: patient.department || '',
+        residentialZone: patient.residential_zone || '',
+        patientType: patient.patient_type || '',
+        eps: patient.eps || '',
+        agreement: patient.agreement || '',
+        educationLevel: patient.education_level || '',
+        activityProfession: patient.activity_profession || '',
+        residenceCountry: patient.residence_country || '',
+        originCountry: patient.origin_country || '',
+        isForeigner: !!patient.is_foreigner,
+        disability: patient.disability || '',
+        reference: patient.reference || '',
+        observations: patient.observations || '',
+        companionName: patient.companion_name || '',
+        companionPhone: patient.companion_phone || '',
+        responsibleName: patient.responsible_name || '',
+        responsiblePhone: patient.responsible_phone || '',
+        responsibleRelationship: patient.responsible_relationship || ''
+      });
+    }
+  }, [patient]);
 
   // Cargar Documentos CIE cuando cambia la atención enfocada
   useEffect(() => {
@@ -650,62 +704,90 @@ const PatientFicha = () => {
 
   // Persistencia simple de notas en localStorage por atención
   useEffect(() => {
-    try {
-      // Nueva clave por paciente para evitar colisiones y pérdidas al recargar
-      const keyV2 = `romedicals_notes_v2:patient:${patient?.id || 'unknown'}`;
-      const rawV2 = localStorage.getItem(keyV2);
-      if (rawV2) {
-        const parsed = JSON.parse(rawV2);
-        if (parsed && typeof parsed === 'object') {
-          setNotesByAppt(parsed);
-          return;
-        }
+    // Cargar notas clínicas rápidas desde backend, vinculadas a appointmentId
+    const loadNotes = async () => {
+      if (!patient?.id) return;
+      try {
+        const resp = await clinicalNotesAPI.getAll({ patientId: patient.id, sortBy: 'created_at', sortOrder: 'DESC' });
+        const list = resp?.data?.notes || [];
+        const byAppt = {};
+        list.forEach(n => {
+          const apptId = n.appointment_id || n.appointmentId || null;
+          if (!apptId) return; // solo mapeamos las vinculadas a una atención
+          const content = n.recommendations || n.present_illness || n.chief_complaint || '';
+          if (!byAppt[apptId]) byAppt[apptId] = [];
+          byAppt[apptId].push({ id: n.id, content, createdAt: n.created_at || n.createdAt, updatedAt: n.updated_at || n.updatedAt });
+        });
+        setNotesByAppt(byAppt);
+      } catch (e) {
+        console.warn('No se pudieron cargar notas clínicas del backend', e);
       }
-      // Compatibilidad con versión anterior (global)
-      const rawV1 = localStorage.getItem('romedicals_notes_v1');
-      if (rawV1) {
-        const parsed = JSON.parse(rawV1);
-        if (parsed && typeof parsed === 'object') {
-          setNotesByAppt(parsed);
-        }
-      }
-    } catch (_) {}
+    };
+    loadNotes();
   }, [patient?.id]);
 
   useEffect(() => {
-    try {
-      const keyV2 = `romedicals_notes_v2:patient:${patient?.id || 'unknown'}`;
-      localStorage.setItem(keyV2, JSON.stringify(notesByAppt || {}));
-      // Escribir también la v1 para compatibilidad con sesiones abiertas en otras pestañas
-      localStorage.setItem('romedicals_notes_v1', JSON.stringify(notesByAppt || {}));
-    } catch (_) {}
+    // Ya no persistimos en localStorage por requerimiento; no-op
   }, [notesByAppt, patient?.id]);
 
   const addOrUpdateNote = (appointmentId, content) => {
-    setNotesByAppt(prev => {
-      const list = [...(prev[appointmentId] || [])];
-      const editing = notesEditingByAppt[appointmentId];
-      const now = new Date().toISOString();
-      if (editing && editing.id) {
-        const idx = list.findIndex(n => n.id === editing.id);
-        if (idx >= 0) {
-          list[idx] = { ...list[idx], content, updatedAt: now };
-        }
-      } else {
-        const id = `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        list.unshift({ id, content, createdAt: now, updatedAt: now });
-      }
-      const next = { ...prev, [appointmentId]: list };
-      // Guardado inmediato para mayor robustez ante recargas rápidas
+    // Persistir en backend como nota clínica simple (type CONTROL), usando 'recommendations' para el texto
+    (async () => {
       try {
-        const keyV2 = `romedicals_notes_v2:patient:${patient?.id || 'unknown'}`;
-        localStorage.setItem(keyV2, JSON.stringify(next));
-        localStorage.setItem('romedicals_notes_v1', JSON.stringify(next));
-      } catch (_) {}
-      return next;
-    });
-    setNotesInputByAppt(prev => ({ ...prev, [appointmentId]: '' }));
-    setNotesEditingByAppt(prev => ({ ...prev, [appointmentId]: null }));
+        const editing = notesEditingByAppt[appointmentId];
+        if (editing && editing.id) {
+          await clinicalNotesAPI.update(editing.id, {
+            patientId: patient.id,
+            appointmentId,
+            type: 'CONTROL',
+            chiefComplaint: '-',
+            presentIllness: '-',
+            physicalExamination: '-',
+            diagnosis: '',
+            treatment: '',
+            recommendations: content,
+            vitalSigns: null,
+            images: [],
+            isConfidential: false
+          });
+          setNotesByAppt(prev => {
+            const list = [...(prev[appointmentId] || [])];
+            const idx = list.findIndex(n => n.id === editing.id);
+            const now = new Date().toISOString();
+            if (idx >= 0) list[idx] = { ...list[idx], content, updatedAt: now };
+            return { ...prev, [appointmentId]: list };
+          });
+        } else {
+          const resp = await clinicalNotesAPI.create({
+            patientId: patient.id,
+            appointmentId,
+            type: 'CONTROL',
+            chiefComplaint: '-',
+            presentIllness: '-',
+            physicalExamination: '-',
+            diagnosis: '',
+            treatment: '',
+            recommendations: content,
+            vitalSigns: null,
+            images: [],
+            isConfidential: false
+          });
+          const created = resp?.data?.note || {};
+          const now = new Date().toISOString();
+          setNotesByAppt(prev => ({
+            ...prev,
+            [appointmentId]: [ { id: created.id, content, createdAt: created.created_at || now, updatedAt: created.updated_at || now }, ...(prev[appointmentId] || []) ]
+          }));
+        }
+        toast.success('Nota guardada');
+      } catch (e) {
+        console.error('Error guardando nota clínica:', e);
+        toast.error('No se pudo guardar la nota');
+      } finally {
+        setNotesInputByAppt(prev => ({ ...prev, [appointmentId]: '' }));
+        setNotesEditingByAppt(prev => ({ ...prev, [appointmentId]: null }));
+      }
+    })();
   };
 
   const startEditNote = (appointmentId, note) => {
@@ -994,7 +1076,7 @@ const PatientFicha = () => {
     }
     // Permitir enviar si hay blob listo o si está grabando/pausado (hará stop+enviar)
     const canSendNow = hasLastAudio || isRecordingAudio;
-    items.push({ key: 'send', onClick: sendLastAudio, label: '➤', title: 'Enviar audio', disabled: !canSendNow || uploadingAudio });
+    items.push({ key: 'send', onClick: sendLastAudio, label: '➤', title: uploadingAudio ? 'Procesando audio...' : 'Enviar audio', disabled: !canSendNow || uploadingAudio });
     return items;
   };
 
@@ -1077,6 +1159,15 @@ const PatientFicha = () => {
       } catch (e) {
         console.warn('[uploadAudioBlob] No se pudo inspeccionar FormData', e);
       }
+      // Mostrar toast de procesamiento
+      try {
+        if (audioProcessToastIdRef.current) {
+          toast.dismiss(audioProcessToastIdRef.current);
+          audioProcessToastIdRef.current = null;
+        }
+        webhookAppliedRef.current = false;
+        audioProcessToastIdRef.current = toast.loading('Procesando audio...');
+      } catch (_) {}
       let resp = await fetch(url, { method: 'POST', body: form });
       try {
         const ct = (resp.headers && resp.headers.get && resp.headers.get('content-type')) || '';
@@ -1194,7 +1285,17 @@ const PatientFicha = () => {
       try {
         console.log('[uploadAudioBlob] Envío exitoso. Status:', resp.status);
       } catch (_) {}
-      toast.success('Audio enviado');
+      try {
+        if (audioProcessToastIdRef.current) {
+          toast.dismiss(audioProcessToastIdRef.current);
+          audioProcessToastIdRef.current = null;
+        }
+        if (webhookAppliedRef.current) {
+          toast.success('Audio procesado: fichas y notas actualizadas');
+        } else {
+          toast.success('Audio enviado');
+        }
+      } catch (_) {}
     } catch (err) {
       console.error('Error enviando audio:', err);
       toast.error('No se pudo enviar el audio (revisa CORS y conectividad)');
@@ -1602,6 +1703,25 @@ const PatientFicha = () => {
     const tabFromUrl = searchParams.get('tab');
     if (tabFromUrl && ['clinical', 'administrative', 'anamnesis'].includes(tabFromUrl)) {
       setActiveTab(tabFromUrl);
+    }
+    // Si viene appointmentId, abrir la atención en detalle
+    const apptFromUrl = searchParams.get('appointmentId');
+    if (apptFromUrl) {
+      try {
+        const apptIdNum = parseInt(apptFromUrl);
+        if (apptIdNum && !isNaN(apptIdNum)) {
+          setViewingAttentionId(apptIdNum);
+          // Asegurar vista clínica
+          setActiveTab(tabFromUrl || 'clinical');
+        }
+      } catch (_) {}
+    }
+    // Si viene ?edit=admin, activar edición automática al cargar el paciente
+    const editParam = (searchParams.get('edit') || '').toLowerCase();
+    if (editParam === 'admin') {
+      // guardamos intención; al cargar patient se inicializa el formulario
+      adminAutoEditAppliedRef.current = false;
+      setActiveTab('administrative');
     }
     
     // Verificar token antes de cargar datos
@@ -2654,7 +2774,11 @@ const PatientFicha = () => {
                             title={b.title}
                             aria-label={b.title}
                           >
-                            {b.key === 'start' ? (
+                            {uploadingAudio && b.key === 'send' ? (
+                              <span className="relative flex items-center justify-center">
+                                <span className="inline-block w-4 h-4 border-2 border-white/70 border-t-transparent rounded-full animate-spin" aria-label="Cargando"></span>
+                              </span>
+                            ) : b.key === 'start' ? (
                               <span className="relative flex items-center justify-center">
                                 <span className="bg-red-500 rounded-full animate-ping absolute opacity-75" style={{ width: '14px', height: '14px' }}></span>
                                 <span className="bg-red-600 rounded-full relative" style={{ width: '12px', height: '12px' }}></span>
@@ -3533,22 +3657,133 @@ const PatientFicha = () => {
 
       {activeTab === 'administrative' && (
         <div className="card">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">Datos Administrativos</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-gray-900">Datos Administrativos</h3>
+            {patient && (
+              <div className="flex items-center gap-2">
+                {!isEditingAdmin ? (
+                  <button
+                    className="btn-secondary text-sm"
+                    onClick={() => {
+                      setIsEditingAdmin(true);
+                      setAdminForm({
+                        firstName: patient.first_name || '',
+                        lastName: patient.last_name || '',
+                        identificationType: patient.identification_type || '',
+                        identificationNumber: patient.identification_number || '',
+                        gender: patient.gender || '',
+                        bloodType: patient.blood_type || '',
+                        occupation: patient.occupation || '',
+                        maritalStatus: patient.marital_status || '',
+                        mobilePhoneCountry: patient.mobile_phone_country || '+57',
+                        mobilePhone: patient.mobile_phone || '',
+                        landlinePhone: patient.landline_phone || '',
+                        email: patient.email || '',
+                        address: patient.address || '',
+                        city: patient.city || '',
+                        department: patient.department || '',
+                        residentialZone: patient.residential_zone || '',
+                        patientType: patient.patient_type || '',
+                        eps: patient.eps || '',
+                        agreement: patient.agreement || '',
+                        educationLevel: patient.education_level || '',
+                        activityProfession: patient.activity_profession || '',
+                        residenceCountry: patient.residence_country || '',
+                        originCountry: patient.origin_country || '',
+                        isForeigner: !!patient.is_foreigner,
+                        disability: patient.disability || '',
+                        reference: patient.reference || '',
+                        observations: patient.observations || '',
+                        companionName: patient.companion_name || '',
+                        companionPhone: patient.companion_phone || '',
+                        responsibleName: patient.responsible_name || '',
+                        responsiblePhone: patient.responsible_phone || '',
+                        responsibleRelationship: patient.responsible_relationship || ''
+                      });
+                    }}
+                  >
+                    Editar información
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      className="btn-secondary text-sm"
+                      onClick={() => { setIsEditingAdmin(false); setAdminForm(null); }}
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      className="btn-primary text-sm"
+                      disabled={savingAdmin}
+                      onClick={async () => {
+                        if (!patient || !adminForm) return;
+                        try {
+                          setSavingAdmin(true);
+                          const birth = patient.birth_date ? new Date(patient.birth_date) : null;
+                          const payload = {
+                            ...adminForm,
+                            birthDay: birth ? String(birth.getDate()) : '',
+                            birthMonth: birth ? monthNameFromIndex(birth.getMonth()) : 'Enero',
+                            birthYear: birth ? String(birth.getFullYear()) : '',
+                          };
+                          const resp = await patientService.updatePatient(patient.id, payload);
+                          const updated = resp.patient || resp;
+                          setPatient(prev => ({ ...prev, ...updated }));
+                          toast.success('Datos administrativos actualizados');
+                          setIsEditingAdmin(false);
+                          setAdminForm(null);
+                        } catch (err) {
+                          console.error('Error guardando datos administrativos', err);
+                          toast.error(err?.message || 'Error al guardar');
+                        } finally {
+                          setSavingAdmin(false);
+                        }
+                      }}
+                    >
+                      {savingAdmin ? 'Guardando...' : 'Guardar cambios'}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div>
               <h4 className="font-medium text-gray-900 mb-3">Información Personal</h4>
               <div className="space-y-2">
                 <div>
                   <span className="text-sm text-gray-500">Nombre completo:</span>
-                  <p className="font-medium">{patient.first_name} {patient.last_name}</p>
+                  {isEditingAdmin ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <input className="input-field" value={adminForm?.firstName || ''} onChange={(e)=>setAdminForm(f=>({ ...f, firstName: e.target.value }))} placeholder="Nombre" />
+                      <input className="input-field" value={adminForm?.lastName || ''} onChange={(e)=>setAdminForm(f=>({ ...f, lastName: e.target.value }))} placeholder="Apellido" />
+                    </div>
+                  ) : (
+                    <p className="font-medium">{patient.first_name} {patient.last_name}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Tipo de documento:</span>
-                  <p className="font-medium">{patient.identification_type || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <select className="input-field" value={adminForm?.identificationType || ''} onChange={(e)=>setAdminForm(f=>({ ...f, identificationType: e.target.value }))}>
+                      <option value="">Seleccione</option>
+                      <option value="CC">CC</option>
+                      <option value="CE">CE</option>
+                      <option value="TI">TI</option>
+                      <option value="PP">PP</option>
+                      <option value="RC">RC</option>
+                    </select>
+                  ) : (
+                    <p className="font-medium">{patient.identification_type || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Número de documento:</span>
-                  <p className="font-medium">{patient.identification_number || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" value={adminForm?.identificationNumber || ''} onChange={(e)=>setAdminForm(f=>({ ...f, identificationNumber: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.identification_number || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Edad:</span>
@@ -3556,19 +3791,45 @@ const PatientFicha = () => {
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Sexo:</span>
-                  <p className="font-medium">{patient.gender || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <select className="input-field" value={adminForm?.gender || ''} onChange={(e)=>setAdminForm(f=>({ ...f, gender: e.target.value }))}>
+                      <option value="">Seleccione</option>
+                      <option>Masculino</option>
+                      <option>Femenino</option>
+                      <option>Otro</option>
+                    </select>
+                  ) : (
+                    <p className="font-medium">{patient.gender || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Grupo sanguíneo:</span>
-                  <p className="font-medium">{patient.blood_type || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <select className="input-field" value={adminForm?.bloodType || ''} onChange={(e)=>setAdminForm(f=>({ ...f, bloodType: e.target.value }))}>
+                      <option value="">Seleccione</option>
+                      {['A+','A-','B+','B-','AB+','AB-','O+','O-'].map(bt => (
+                        <option key={bt} value={bt}>{bt}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="font-medium">{patient.blood_type || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Ocupación:</span>
-                  <p className="font-medium">{patient.occupation || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" value={adminForm?.occupation || ''} onChange={(e)=>setAdminForm(f=>({ ...f, occupation: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.occupation || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Estado civil:</span>
-                  <p className="font-medium">{patient.marital_status || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" value={adminForm?.maritalStatus || ''} onChange={(e)=>setAdminForm(f=>({ ...f, maritalStatus: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.marital_status || 'No especificado'}</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -3577,31 +3838,62 @@ const PatientFicha = () => {
               <div className="space-y-2">
                 <div>
                   <span className="text-sm text-gray-500">Teléfono móvil:</span>
-                  <p className="font-medium">{patient.mobile_phone ? `${patient.mobile_phone_country || '+57'} ${patient.mobile_phone}` : 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <div className="grid grid-cols-3 gap-2">
+                      <input className="input-field" value={adminForm?.mobilePhoneCountry || '+57'} onChange={(e)=>setAdminForm(f=>({ ...f, mobilePhoneCountry: e.target.value }))} placeholder="Código" />
+                      <input className="input-field col-span-2" value={adminForm?.mobilePhone || ''} onChange={(e)=>setAdminForm(f=>({ ...f, mobilePhone: e.target.value }))} placeholder="Número" />
+                    </div>
+                  ) : (
+                    <p className="font-medium">{patient.mobile_phone ? `${patient.mobile_phone_country || '+57'} ${patient.mobile_phone}` : 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Teléfono fijo:</span>
-                  <p className="font-medium">{patient.landline_phone || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" value={adminForm?.landlinePhone || ''} onChange={(e)=>setAdminForm(f=>({ ...f, landlinePhone: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.landline_phone || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Email:</span>
-                  <p className="font-medium">{patient.email || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" type="email" value={adminForm?.email || ''} onChange={(e)=>setAdminForm(f=>({ ...f, email: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.email || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Dirección:</span>
-                  <p className="font-medium">{patient.address || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" value={adminForm?.address || ''} onChange={(e)=>setAdminForm(f=>({ ...f, address: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.address || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Ciudad:</span>
-                  <p className="font-medium">{patient.city || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" value={adminForm?.city || ''} onChange={(e)=>setAdminForm(f=>({ ...f, city: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.city || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Departamento:</span>
-                  <p className="font-medium">{patient.department || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" value={adminForm?.department || ''} onChange={(e)=>setAdminForm(f=>({ ...f, department: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.department || 'No especificado'}</p>
+                  )}
                 </div>
                 <div>
                   <span className="text-sm text-gray-500">Zona residencial:</span>
-                  <p className="font-medium">{patient.residential_zone || 'No especificado'}</p>
+                  {isEditingAdmin ? (
+                    <input className="input-field" value={adminForm?.residentialZone || ''} onChange={(e)=>setAdminForm(f=>({ ...f, residentialZone: e.target.value }))} />
+                  ) : (
+                    <p className="font-medium">{patient.residential_zone || 'No especificado'}</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -3615,23 +3907,43 @@ const PatientFicha = () => {
                 <div className="space-y-2">
                   <div>
                     <span className="text-sm text-gray-500">Tipo de paciente:</span>
-                    <p className="font-medium">{patient.patient_type || 'No especificado'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.patientType || ''} onChange={(e)=>setAdminForm(f=>({ ...f, patientType: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.patient_type || 'No especificado'}</p>
+                    )}
                   </div>
                   <div>
                     <span className="text-sm text-gray-500">EPS:</span>
-                    <p className="font-medium">{patient.eps || 'No especificado'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.eps || ''} onChange={(e)=>setAdminForm(f=>({ ...f, eps: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.eps || 'No especificado'}</p>
+                    )}
                   </div>
                   <div>
                     <span className="text-sm text-gray-500">Convenio:</span>
-                    <p className="font-medium">{patient.agreement || 'No especificado'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.agreement || ''} onChange={(e)=>setAdminForm(f=>({ ...f, agreement: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.agreement || 'No especificado'}</p>
+                    )}
                   </div>
                   <div>
                     <span className="text-sm text-gray-500">Nivel educativo:</span>
-                    <p className="font-medium">{patient.education_level || 'No especificado'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.educationLevel || ''} onChange={(e)=>setAdminForm(f=>({ ...f, educationLevel: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.education_level || 'No especificado'}</p>
+                    )}
                   </div>
                   <div>
                     <span className="text-sm text-gray-500">Actividad/Profesión:</span>
-                    <p className="font-medium">{patient.activity_profession || 'No especificado'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.activityProfession || ''} onChange={(e)=>setAdminForm(f=>({ ...f, activityProfession: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.activity_profession || 'No especificado'}</p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -3639,23 +3951,46 @@ const PatientFicha = () => {
                 <div className="space-y-2">
                   <div>
                     <span className="text-sm text-gray-500">País de residencia:</span>
-                    <p className="font-medium">{patient.residence_country || 'No especificado'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.residenceCountry || ''} onChange={(e)=>setAdminForm(f=>({ ...f, residenceCountry: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.residence_country || 'No especificado'}</p>
+                    )}
                   </div>
                   <div>
                     <span className="text-sm text-gray-500">País de origen:</span>
-                    <p className="font-medium">{patient.origin_country || 'No especificado'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.originCountry || ''} onChange={(e)=>setAdminForm(f=>({ ...f, originCountry: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.origin_country || 'No especificado'}</p>
+                    )}
                   </div>
                   <div>
                     <span className="text-sm text-gray-500">Extranjero:</span>
-                    <p className="font-medium">{patient.is_foreigner ? 'Sí' : 'No'}</p>
+                    {isEditingAdmin ? (
+                      <label className="flex items-center gap-2">
+                        <input type="checkbox" className="input-field" checked={!!adminForm?.isForeigner} onChange={(e)=>setAdminForm(f=>({ ...f, isForeigner: e.target.checked }))} />
+                        <span className="text-sm">Sí</span>
+                      </label>
+                    ) : (
+                      <p className="font-medium">{patient.is_foreigner ? 'Sí' : 'No'}</p>
+                    )}
                   </div>
                   <div>
                     <span className="text-sm text-gray-500">Discapacidad:</span>
-                    <p className="font-medium">{patient.disability || 'Ninguna'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.disability || ''} onChange={(e)=>setAdminForm(f=>({ ...f, disability: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.disability || 'Ninguna'}</p>
+                    )}
                   </div>
                   <div>
                     <span className="text-sm text-gray-500">Referencia:</span>
-                    <p className="font-medium">{patient.reference || 'No especificado'}</p>
+                    {isEditingAdmin ? (
+                      <input className="input-field" value={adminForm?.reference || ''} onChange={(e)=>setAdminForm(f=>({ ...f, reference: e.target.value }))} />
+                    ) : (
+                      <p className="font-medium">{patient.reference || 'No especificado'}</p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -3663,40 +3998,60 @@ const PatientFicha = () => {
           </div>
           
           {/* Información de acompañante y responsable */}
-          {(patient.companion_name || patient.responsible_name) && (
+          {(patient.companion_name || patient.responsible_name || isEditingAdmin) && (
             <div className="mt-6 pt-6 border-t border-gray-200">
               <h4 className="font-medium text-gray-900 mb-3">Información de Acompañante y Responsable</h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {patient.companion_name && (
+                {(patient.companion_name || isEditingAdmin) && (
                   <div>
                     <h5 className="text-sm font-medium text-gray-700 mb-2">Acompañante</h5>
                     <div className="space-y-2">
                       <div>
                         <span className="text-sm text-gray-500">Nombre:</span>
-                        <p className="font-medium">{patient.companion_name}</p>
+                        {isEditingAdmin ? (
+                          <input className="input-field" value={adminForm?.companionName || ''} onChange={(e)=>setAdminForm(f=>({ ...f, companionName: e.target.value }))} />
+                        ) : (
+                          <p className="font-medium">{patient.companion_name}</p>
+                        )}
                       </div>
                       <div>
                         <span className="text-sm text-gray-500">Teléfono:</span>
-                        <p className="font-medium">{patient.companion_phone || 'No especificado'}</p>
+                        {isEditingAdmin ? (
+                          <input className="input-field" value={adminForm?.companionPhone || ''} onChange={(e)=>setAdminForm(f=>({ ...f, companionPhone: e.target.value }))} />
+                        ) : (
+                          <p className="font-medium">{patient.companion_phone || 'No especificado'}</p>
+                        )}
                       </div>
                     </div>
                   </div>
                 )}
-                {patient.responsible_name && (
+                {(patient.responsible_name || isEditingAdmin) && (
                   <div>
                     <h5 className="text-sm font-medium text-gray-700 mb-2">Responsable</h5>
                     <div className="space-y-2">
                       <div>
                         <span className="text-sm text-gray-500">Nombre:</span>
-                        <p className="font-medium">{patient.responsible_name}</p>
+                        {isEditingAdmin ? (
+                          <input className="input-field" value={adminForm?.responsibleName || ''} onChange={(e)=>setAdminForm(f=>({ ...f, responsibleName: e.target.value }))} />
+                        ) : (
+                          <p className="font-medium">{patient.responsible_name}</p>
+                        )}
                       </div>
                       <div>
                         <span className="text-sm text-gray-500">Teléfono:</span>
-                        <p className="font-medium">{patient.responsible_phone || 'No especificado'}</p>
+                        {isEditingAdmin ? (
+                          <input className="input-field" value={adminForm?.responsiblePhone || ''} onChange={(e)=>setAdminForm(f=>({ ...f, responsiblePhone: e.target.value }))} />
+                        ) : (
+                          <p className="font-medium">{patient.responsible_phone || 'No especificado'}</p>
+                        )}
                       </div>
                       <div>
                         <span className="text-sm text-gray-500">Parentesco:</span>
-                        <p className="font-medium">{patient.responsible_relationship || 'No especificado'}</p>
+                        {isEditingAdmin ? (
+                          <input className="input-field" value={adminForm?.responsibleRelationship || ''} onChange={(e)=>setAdminForm(f=>({ ...f, responsibleRelationship: e.target.value }))} />
+                        ) : (
+                          <p className="font-medium">{patient.responsible_relationship || 'No especificado'}</p>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -3706,11 +4061,15 @@ const PatientFicha = () => {
           )}
           
           {/* Observaciones */}
-          {patient.observations ? (
+          {(patient.observations || isEditingAdmin) ? (
             <div className="mt-6 pt-6 border-t border-gray-200">
               <h4 className="font-medium text-gray-900 mb-3">Observaciones</h4>
               <div className="bg-gray-50 p-4 rounded-lg">
-                <p className="text-gray-700">{patient.observations}</p>
+                {isEditingAdmin ? (
+                  <textarea className="input-field w-full" rows="3" value={adminForm?.observations || ''} onChange={(e)=>setAdminForm(f=>({ ...f, observations: e.target.value }))} />
+                ) : (
+                  <p className="text-gray-700">{patient.observations}</p>
+                )}
               </div>
             </div>
           ) : (

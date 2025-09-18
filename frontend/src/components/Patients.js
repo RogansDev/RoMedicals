@@ -126,8 +126,13 @@ const Patients = () => {
   };
 
   const handleOpenPatientFicha = (patient) => {
-    // Navegar a la ficha del paciente con la pestaña de datos administrativos activa
+    // Ver ficha del paciente en Datos Administrativos sin modo edición
     navigate(`/patients/${patient.id}/ficha?tab=administrative`);
+  };
+
+  const handleOpenPatientFichaEdit = (patient) => {
+    // Ir a la ficha con Datos Administrativos en modo edición
+    navigate(`/patients/${patient.id}/ficha?tab=administrative&edit=admin`);
   };
 
   const handleCancel = () => {
@@ -448,7 +453,7 @@ const Patients = () => {
                       <div className="action-buttons">
                         <button 
                           className="btn-icon btn-icon-edit"
-                          onClick={() => handleEdit(patient)}
+                          onClick={() => handleOpenPatientFichaEdit(patient)}
                         >
                           Editar
                         </button>
