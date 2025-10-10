@@ -364,6 +364,20 @@ async function createTables() {
     await query('CREATE INDEX IF NOT EXISTS idx_appt_custom_forms_spec ON appointment_custom_forms(specialty_id)');
     console.log('✅ Tabla appointment_custom_forms creada');
 
+    // Tabla de horarios de especialistas (no destructiva)
+    await query(`
+      CREATE TABLE IF NOT EXISTS specialist_schedules (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        schedule JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_id)
+      )
+    `);
+    await query('CREATE UNIQUE INDEX IF NOT EXISTS ux_specialist_schedules_user ON specialist_schedules(user_id)');
+    console.log('✅ Tabla specialist_schedules creada/verificada');
+
     console.log('🎉 Migración completada exitosamente!');
 
   } catch (error) {

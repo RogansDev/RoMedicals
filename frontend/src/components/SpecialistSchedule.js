@@ -62,7 +62,6 @@ const SpecialistSchedule = () => {
           hasBreak: false,
           simultaneousPatients: 3,
           interval: 15,
-          box: 'Box 1',
           modality: 'both' // both, in-person, virtual
         };
       });
@@ -198,9 +197,6 @@ const SpecialistSchedule = () => {
                     Término Descanso
                   </th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Box Atención
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     No Atiende
                   </th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -219,7 +215,6 @@ const SpecialistSchedule = () => {
                     hasBreak: false,
                     simultaneousPatients: 3,
                     interval: 15,
-                    box: 'Box 1',
                     modality: 'both'
                   };
 
@@ -310,19 +305,7 @@ const SpecialistSchedule = () => {
                         </select>
                       </td>
 
-                      {/* Box Atención */}
-                      <td className="px-4 py-4 whitespace-nowrap">
-                        <select
-                          value={daySchedule.box}
-                          onChange={(e) => handleScheduleChange(day.key, 'box', e.target.value)}
-                          disabled={!daySchedule.isWorking}
-                          className="input-field text-sm"
-                        >
-                          {['Box 1', 'Box 2', 'Box 3', 'Box 4', 'Box 5'].map(box => (
-                            <option key={box} value={box}>{box}</option>
-                          ))}
-                        </select>
-                      </td>
+                      
 
                       {/* No Atiende */}
                       <td className="px-4 py-4 whitespace-nowrap">

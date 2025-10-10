@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import patientService from '../services/patientService';
 import userService from '../services/userService';
-import { specialtiesAPI, usersAPI } from '../config/api';
+import { specialtiesAPI, usersAPI, specialistsAPI, appointmentsAPI } from '../config/api';
 
 const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   const [formData, setFormData] = useState({
@@ -26,6 +26,9 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   const [patientSearchResults, setPatientSearchResults] = useState([]);
   const [doctors, setDoctors] = useState([]);
   const [specialties, setSpecialties] = useState([]);
+  const [doctorSchedule, setDoctorSchedule] = useState(null);
+  const [availableTimes, setAvailableTimes] = useState([]);
+  const [loadingTimes, setLoadingTimes] = useState(false);
 
   // Cargar doctores y especialidades al abrir el modal
   useEffect(() => {
@@ -108,11 +111,107 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
     { value: 'pendiente', label: 'Pendiente' }
   ];
 
-  // Horarios disponibles
-  const timeSlots = [
-    '08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
-    '14:00', '14:30', '15:00', '15:30', '16:00', '16:30', '17:00', '17:30'
-  ];
+  const getDayKeyFromDate = (dateStr) => {
+    try {
+      const d = new Date(dateStr + 'T00:00:00');
+      const idx = d.getDay(); // 0 domingo ... 6 sábado
+      return ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'][idx];
+    } catch (_) { return null; }
+  };
+
+  const toMinutes = (hhmm) => {
+    const [h, m] = String(hhmm).split(':').map(n => parseInt(n, 10));
+    return (h * 60) + (m || 0);
+  };
+  const toHHMM = (mins) => {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  };
+
+  const isToday = (dateStr) => {
+    const today = new Date();
+    const d = new Date(dateStr + 'T00:00:00');
+    return today.toISOString().slice(0,10) === d.toISOString().slice(0,10);
+  };
+
+  const findNextWorkingDate = (schedule, fromDateStr) => {
+    try {
+      let d = new Date(fromDateStr + 'T00:00:00');
+      for (let i = 0; i < 14; i++) {
+        const key = getDayKeyFromDate(d.toISOString().slice(0,10));
+        const day = schedule?.[key];
+        if (day && day.isWorking) return d.toISOString().slice(0,10);
+        d.setDate(d.getDate() + 1);
+      }
+    } catch (_) {}
+    return fromDateStr;
+  };
+
+  const loadAvailableTimes = async (doctorId, dateStr, schedule) => {
+    try {
+      setLoadingTimes(true);
+      setAvailableTimes([]);
+      if (!doctorId || !dateStr || !schedule) return;
+      const key = getDayKeyFromDate(dateStr);
+      const day = schedule[key];
+      if (!day || !day.isWorking) { setAvailableTimes([]); return; }
+
+      const interval = Math.max(5, Math.min(120, parseInt(day.interval || 15, 10)));
+      const simCap = Math.max(1, Math.min(10, parseInt(day.simultaneousPatients || 1, 10)));
+      const startMin = toMinutes(day.startTime || '08:00');
+      const endMin = toMinutes(day.endTime || '18:00');
+      const breakStartMin = day.hasBreak ? toMinutes(day.breakStart || '12:00') : null;
+      const breakEndMin = day.hasBreak ? toMinutes(day.breakEnd || '13:00') : null;
+
+      const now = new Date();
+      const nowMins = (now.getHours() * 60) + now.getMinutes();
+
+      // Construir slots
+      let slots = [];
+      for (let t = startMin; t + 1 <= endMin; t += interval) {
+        // Excluir descanso
+        if (day.hasBreak && breakStartMin != null && breakEndMin != null) {
+          if (!(t >= breakEndMin || (t + interval) <= breakStartMin)) {
+            continue;
+          }
+        }
+        // Excluir pasado si es hoy
+        if (isToday(dateStr) && t <= nowMins) continue;
+        slots.push(toHHMM(t));
+      }
+
+      // Traer citas existentes del día para el doctor
+      const apptsResp = await appointmentsAPI.getAll({ doctorId, dateFrom: dateStr, dateTo: dateStr, limit: 1000 });
+      const appts = Array.isArray(apptsResp?.data?.appointments) ? apptsResp.data.appointments : [];
+
+      const slotIsFree = (slotHHMM) => {
+        const slotStart = toMinutes(slotHHMM);
+        const newDuration = 30; // duración por defecto del formulario
+        const slotEnd = slotStart + newDuration;
+        let overlapping = 0;
+        for (const a of appts) {
+          const aStart = toMinutes(a.appointment_time);
+          const aDur = parseInt(a.duration || 30, 10);
+          const aEnd = aStart + aDur;
+          const canceled = (a.status === 'CANCELADA' || a.status === 'NO_ASISTIO');
+          if (canceled) continue;
+          const overlap = (aStart < slotEnd) && (slotStart < aEnd);
+          if (overlap) overlapping += 1;
+          if (overlapping >= simCap) return false;
+        }
+        return true;
+      };
+
+      const filtered = slots.filter(slotIsFree);
+      setAvailableTimes(filtered);
+    } catch (e) {
+      console.error('Error calculando horas disponibles:', e);
+      setAvailableTimes([]);
+    } finally {
+      setLoadingTimes(false);
+    }
+  };
 
   useEffect(() => {
     if (isOpen) {
@@ -197,6 +296,30 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
       specialty: selSpecName || '',
       specialtyId: selSpecId || ''
     }));
+
+    // Cargar horario del médico y recomputar horas disponibles
+    (async () => {
+      try {
+        if (!doctorId) { setDoctorSchedule(null); setAvailableTimes([]); return; }
+        const { data } = await specialistsAPI.getSchedule(doctorId);
+        const schedule = data?.schedule || null;
+        setDoctorSchedule(schedule);
+        // Ajustar fecha si el día actual no es laborable
+        const currentDate = (formData.date && formData.date !== '') ? formData.date : new Date().toISOString().slice(0,10);
+        const key = getDayKeyFromDate(currentDate);
+        if (!schedule?.[key]?.isWorking) {
+          const nextDate = findNextWorkingDate(schedule, currentDate);
+          setFormData(prev => ({ ...prev, date: nextDate }));
+          await loadAvailableTimes(doctorId, nextDate, schedule);
+        } else {
+          await loadAvailableTimes(doctorId, currentDate, schedule);
+        }
+      } catch (err) {
+        console.error('Error cargando horario del médico:', err);
+        setDoctorSchedule(null);
+        setAvailableTimes([]);
+      }
+    })();
   };
 
   const handleSpecialtyChange = (e) => {
@@ -209,6 +332,17 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
       specialty: selectedSpec ? selectedSpec.name : '',
     }));
   };
+
+  // Recalcular horas cuando cambie fecha si ya hay médico y horario
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!formData.doctorId || !formData.date || !doctorSchedule) {
+      setAvailableTimes([]);
+      return;
+    }
+    loadAvailableTimes(formData.doctorId, formData.date, doctorSchedule);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formData.date, formData.doctorId, doctorSchedule, isOpen]);
 
   const validateForm = () => {
     // Normalizar valores en memoria antes de validar
@@ -440,6 +574,9 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
                       onChange={handleInputChange}
                       min={new Date().toISOString().split('T')[0]}
                     />
+                    {formData.doctorId && doctorSchedule && formData.date && !doctorSchedule?.[getDayKeyFromDate(formData.date)]?.isWorking && (
+                      <p className="text-xs text-red-600 mt-1">El médico no atiende este día. Seleccione otra fecha.</p>
+                    )}
                   </div>
                   <div>
                     <label className="form-label">Hora *</label>
@@ -450,10 +587,19 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
                       onChange={handleInputChange}
                     >
                       <option value="">Seleccionar hora</option>
-                      {timeSlots.map(time => (
+                      {loadingTimes && (
+                        <option value="" disabled>Calculando horarios...</option>
+                      )}
+                      {!loadingTimes && availableTimes.length === 0 && (
+                        <option value="" disabled>No hay horas disponibles</option>
+                      )}
+                      {!loadingTimes && availableTimes.map(time => (
                         <option key={time} value={time}>{time}</option>
                       ))}
                     </select>
+                    {formData.doctorId && formData.date && !loadingTimes && availableTimes.length === 0 && (
+                      <p className="text-xs text-gray-500 mt-1">No hay horas disponibles para la fecha seleccionada.</p>
+                    )}
                   </div>
                 </div>
 

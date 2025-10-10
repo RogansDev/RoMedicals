@@ -160,9 +160,25 @@ const PatientFicha = () => {
   // Aplica respuesta del webhook (JSON) a la ficha personalizada y guarda nota de Recomendaciones
   const handleWebhookStructuredResponse = async (data) => {
     try {
-      if (!data || typeof data !== 'object') return;
+      if (!data) return;
       const apptId = viewingAttentionId;
       if (!apptId) return;
+
+      // Flexibilidad: aceptar arrays o envoltorios tipo { data: {...} } / { result: {...} }
+      let obj = data;
+      if (typeof obj === 'string') {
+        try { obj = JSON.parse(obj); } catch (_) { obj = {}; }
+      }
+      if (Array.isArray(obj)) {
+        obj = obj[0] || {};
+      }
+      if (obj && typeof obj === 'object') {
+        if (obj.data && typeof obj.data === 'object') obj = obj.data;
+        else if (obj.result && typeof obj.result === 'object') obj = obj.result;
+        else if (obj.response && typeof obj.response === 'object') obj = obj.response;
+      } else {
+        return;
+      }
 
       // Ubicar form seleccionado y campos
       const selectedId = selectedCustomFormIdByAppt[apptId];
@@ -206,12 +222,19 @@ const PatientFicha = () => {
       const currentValues = { ...(customFormValuesByAppt[apptId] || {}) };
       let touched = false;
 
-      for (const [k, v] of Object.entries(data)) {
+      let recommendationsCaptured = false;
+      for (const [k, v] of Object.entries(obj)) {
         const normKey = normalizeLabel(k);
         if (!normKey) continue;
-        if (normKey === 'recomendaciones') {
+        if (normKey === 'recomendaciones' || normKey.startsWith('recomend') || normKey.includes('recomend')) {
           const rec = typeof v === 'string' ? v : (v != null ? JSON.stringify(v) : '');
-          if (rec) addOrUpdateNote(apptId, rec);
+          if (rec) {
+            try {
+              console.log('[webhook] Capturando Recomendaciones para notas');
+              addOrUpdateNote(apptId, rec);
+              recommendationsCaptured = true;
+            } catch (_) {}
+          }
           continue;
         }
         const fieldName = labelToFieldName[normKey];
@@ -243,6 +266,11 @@ const PatientFicha = () => {
         } catch (e) {
           console.warn('Error guardando autollenado de ficha:', e);
         }
+      }
+
+      // Si al menos guardamos recomendaciones como nota, marcar aplicado para feedback
+      if (!webhookAppliedRef.current && recommendationsCaptured) {
+        webhookAppliedRef.current = true;
       }
     } catch (e) {
       console.warn('No se pudo procesar respuesta del webhook para autollenado', e);
@@ -735,6 +763,15 @@ const PatientFicha = () => {
     (async () => {
       try {
         const editing = notesEditingByAppt[appointmentId];
+        // Normalizar y respetar límite backend: recommendations máx 1000 chars
+        let text = String(content || '').trim();
+        // Compactar espacios y saltos para evitar rebasar por formato
+        text = text.replace(/\s+/g, ' ');
+        const MAX_LEN = 1000;
+        if (text.length > MAX_LEN) {
+          text = text.slice(0, MAX_LEN);
+          try { toast('Recomendaciones largas: se guardó versión recortada (1000 caracteres)'); } catch (_) {}
+        }
         if (editing && editing.id) {
           await clinicalNotesAPI.update(editing.id, {
             patientId: patient.id,
@@ -745,8 +782,7 @@ const PatientFicha = () => {
             physicalExamination: '-',
             diagnosis: '',
             treatment: '',
-            recommendations: content,
-            vitalSigns: null,
+            recommendations: text,
             images: [],
             isConfidential: false
           });
@@ -754,7 +790,7 @@ const PatientFicha = () => {
             const list = [...(prev[appointmentId] || [])];
             const idx = list.findIndex(n => n.id === editing.id);
             const now = new Date().toISOString();
-            if (idx >= 0) list[idx] = { ...list[idx], content, updatedAt: now };
+            if (idx >= 0) list[idx] = { ...list[idx], content: text, updatedAt: now };
             return { ...prev, [appointmentId]: list };
           });
         } else {
@@ -767,8 +803,7 @@ const PatientFicha = () => {
             physicalExamination: '-',
             diagnosis: '',
             treatment: '',
-            recommendations: content,
-            vitalSigns: null,
+            recommendations: text,
             images: [],
             isConfidential: false
           });
@@ -776,13 +811,20 @@ const PatientFicha = () => {
           const now = new Date().toISOString();
           setNotesByAppt(prev => ({
             ...prev,
-            [appointmentId]: [ { id: created.id, content, createdAt: created.created_at || now, updatedAt: created.updated_at || now }, ...(prev[appointmentId] || []) ]
+            [appointmentId]: [ { id: created.id, content: text, createdAt: created.created_at || now, updatedAt: created.updated_at || now }, ...(prev[appointmentId] || []) ]
           }));
         }
         toast.success('Nota guardada');
       } catch (e) {
-        console.error('Error guardando nota clínica:', e);
-        toast.error('No se pudo guardar la nota');
+        console.error('Error guardando nota clínica:', e?.response?.data || e);
+        const details = e?.response?.data?.details;
+        if (Array.isArray(details) && details.length) {
+          toast.error(`No se pudo guardar la nota: ${details[0]}`);
+        } else if (e?.response?.data?.message) {
+          toast.error(`No se pudo guardar la nota: ${e.response.data.message}`);
+        } else {
+          toast.error('No se pudo guardar la nota');
+        }
       } finally {
         setNotesInputByAppt(prev => ({ ...prev, [appointmentId]: '' }));
         setNotesEditingByAppt(prev => ({ ...prev, [appointmentId]: null }));

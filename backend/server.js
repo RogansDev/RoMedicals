@@ -99,6 +99,7 @@ app.use('/api/rips', require('./routes/rips'));
 app.use('/api/cie-docs', require('./routes/cie-docs'));
 app.use('/api/uploads', require('./routes/uploads'));
 app.use('/api/ai', require('./routes/ai'));
+app.use('/api/specialists', require('./routes/specialists'));
 
 // Ruta de salud
 app.get('/api/health', (req, res) => {

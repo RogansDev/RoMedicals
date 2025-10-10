@@ -19,6 +19,10 @@ const Specialties = () => {
   const [showCustomFormEditor, setShowCustomFormEditor] = useState(false);
   const [currentTemplateType, setCurrentTemplateType] = useState('');
   const [currentSpecialty, setCurrentSpecialty] = useState(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [specialtyToDelete, setSpecialtyToDelete] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteErrorMessage, setDeleteErrorMessage] = useState('');
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -359,16 +363,33 @@ const Specialties = () => {
     setShowForm(true);
   };
 
-  const handleDelete = async (id) => {
-    if (window.confirm('¿Está seguro de eliminar esta especialidad?')) {
-      try {
-        await specialtiesAPI.delete(id);
-        setSpecialties(specialties.filter(s => s.id !== id));
-        toast.success('Especialidad eliminada exitosamente');
-      } catch (error) {
-        console.error('Error deleting specialty:', error);
-        toast.error('Error al eliminar especialidad');
-      }
+  const openDeleteModal = (spec) => {
+    setSpecialtyToDelete(spec);
+    setShowDeleteModal(true);
+  };
+
+  const cancelDelete = () => {
+    setShowDeleteModal(false);
+    setSpecialtyToDelete(null);
+    setIsDeleting(false);
+    setDeleteErrorMessage('');
+  };
+
+  const confirmDelete = async () => {
+    if (!specialtyToDelete) return;
+    try {
+      setIsDeleting(true);
+      await specialtiesAPI.delete(specialtyToDelete.id);
+      setSpecialties(prev => prev.filter(s => s.id !== specialtyToDelete.id));
+      toast.success('Especialidad eliminada exitosamente');
+      cancelDelete();
+    } catch (error) {
+      console.error('Error deleting specialty:', error);
+      const msg = error?.response?.data?.message || 'Error al eliminar especialidad';
+      setDeleteErrorMessage(msg);
+      // Mantener modal abierto para que el usuario lea el detalle
+      toast.error(msg);
+      setIsDeleting(false);
     }
   };
 
@@ -1088,7 +1109,7 @@ CMP: [NUMERO_COLEGIATURA]`
                     Editar
                   </button>
                   <button
-                    onClick={() => handleDelete(specialty.id)}
+                    onClick={() => openDeleteModal(specialty)}
                     className="text-red-600 hover:text-red-900 text-sm"
                   >
                     Eliminar
@@ -1142,6 +1163,49 @@ CMP: [NUMERO_COLEGIATURA]`
             setTemplatesCache(prev => ({ ...prev, [`${editingSpecialty.id}:evolutions`]: refreshed }));
           }}
         />
+      )}
+
+      {/* Modal de confirmación de eliminación */}
+      {showDeleteModal && specialtyToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-gray-900 bg-opacity-50" onClick={cancelDelete}></div>
+          <div className="relative z-10 w-full max-w-md mx-4">
+            <div className="card">
+              <div className="flex items-start justify-between mb-2">
+                <h3 className="text-lg font-semibold text-gray-900">Confirmar eliminación</h3>
+              </div>
+              {deleteErrorMessage && (
+                <div className="mb-3 p-3 rounded bg-red-50 text-red-700 text-sm border border-red-200">
+                  {deleteErrorMessage}
+                </div>
+              )}
+              <p className="text-sm text-gray-600 mb-4">
+                ¿Seguro que deseas eliminar la especialidad
+                {" "}
+                <span className="font-medium text-gray-900">{specialtyToDelete.name}</span>?
+                Esta acción no se puede deshacer.
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  type="button"
+                  onClick={cancelDelete}
+                  className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+                  disabled={isDeleting}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDelete}
+                  disabled={isDeleting}
+                  className={`px-4 py-2 rounded-md text-white ${isDeleting ? 'bg-red-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'}`}
+                >
+                  {isDeleting ? 'Eliminando...' : 'Eliminar'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
