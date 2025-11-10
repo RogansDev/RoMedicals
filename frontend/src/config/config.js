@@ -1,7 +1,7 @@
 // Configuración centralizada de la aplicación
 const config = {
   // URL base de la API
-  API_BASE_URL: '/api',
+  API_BASE_URL: 'http://localhost:3001/api',
   
   // Configuración del entorno
   ENV: 'development',

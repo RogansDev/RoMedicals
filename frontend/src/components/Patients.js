@@ -1,16 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import patientService from '../services/patientService';
 
 const Patients = () => {
   const navigate = useNavigate();
+  const user = JSON.parse(localStorage.getItem('user') || '{}');
+  const isDoctor = user?.role === 'medical_user';
   const [patients, setPatients] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [editingPatient, setEditingPatient] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [patientToDelete, setPatientToDelete] = useState(null);
+  const [search, setSearch] = useState('');
+  const [conditionFilter, setConditionFilter] = useState('');
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const PAGE_SIZE = 12;
   const [formData, setFormData] = useState({
     // Datos personales
     guardianId: '',
@@ -56,21 +63,39 @@ const Patients = () => {
   // Cargar pacientes al montar el componente
   useEffect(() => {
     loadPatients();
-  }, []);
+  }, [page]);
 
   // Función para cargar pacientes desde el backend
   const loadPatients = async () => {
     try {
       setLoading(true);
-      const response = await patientService.getPatients();
+      const response = await patientService.getPatients({ page, limit: PAGE_SIZE, search });
       setPatients(response.patients || []);
+      if (response.pagination) setTotalPages(response.pagination.totalPages || 1);
     } catch (error) {
       console.error('Error cargando pacientes:', error);
-      toast.error('Error al cargar los pacientes');
+      if (error.status === 401 || error.status === 403) {
+        toast.error('Sesión expirada o sin permisos. Inicia sesión nuevamente.');
+        navigate('/login');
+        return;
+      }
+      toast.error(error.message || 'Error al cargar los pacientes');
     } finally {
       setLoading(false);
     }
   };
+
+  const filteredPatients = useMemo(() => {
+    let list = patients;
+    if (conditionFilter) {
+      const cf = conditionFilter.toLowerCase();
+      list = list.filter(p => {
+        const conditions = (p.conditions || p.medical_conditions || []).join(' ').toLowerCase();
+        return conditions.includes(cf);
+      });
+    }
+    return list;
+  }, [patients, conditionFilter]);
 
   const handleInputChange = (field, value) => {
     setFormData(prev => ({
@@ -346,135 +371,124 @@ const Patients = () => {
 
   return (
     <div className="space-y-6">
+      {/* Encabezado */}
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Gestión de Pacientes</h1>
-        <button
-          onClick={() => setShowForm(true)}
-          className="btn-primary"
-        >
-          <span style={{ fontSize: '14px', marginRight: '8px' }}>➕</span>
-          Nuevo Paciente
-        </button>
+        <a href="/agenda" className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm shadow">Nueva consulta</a>
       </div>
 
-      {/* Lista de Pacientes */}
-      <div className="card">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-semibold">Pacientes Registrados</h2>
-          <div className="text-sm text-gray-600 bg-blue-50 px-3 py-2 rounded-lg border border-blue-200">
-            💡 <strong>Tip:</strong> Haz clic en el nombre del paciente para ver su ficha completa
+      {/* Buscador */}
+      <div className="bg-white border rounded-xl p-4">
+        <div className="flex items-center gap-3">
+          <div className="flex-1 relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
+            <input
+              className="w-full pl-9 pr-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Ingresa el Nombre o Documento de identidad de tu paciente"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
           </div>
+          <select
+            className="border rounded-md px-3 py-2 pr-8 text-sm text-gray-700"
+            value={conditionFilter}
+            onChange={(e) => setConditionFilter(e.target.value)}
+          >
+            <option value="">Filtrar por Condición</option>
+            <option value="asma">Asma</option>
+            <option value="diabetes">Diabetes</option>
+            <option value="cardio">Cardiopatía</option>
+          </select>
+          <button onClick={() => { setPage(1); loadPatients(); }} className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm">Buscar</button>
         </div>
-        
-        {loading ? (
-          <div className="flex justify-center items-center py-8">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            <span className="ml-2 text-gray-600">Cargando pacientes...</span>
+      </div>
+
+      {/* Grid de pacientes */}
+      {loading ? (
+        <div className="flex justify-center items-center py-8">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          <span className="ml-2 text-gray-600">Cargando pacientes...</span>
+        </div>
+      ) : filteredPatients.length === 0 ? (
+        <div className="bg-white border rounded-xl p-8 flex flex-col items-center justify-center text-center">
+          <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-4">
+            <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+            </svg>
           </div>
-        ) : patients.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">👥</div>
-            <h3 className="empty-state-title">No hay pacientes registrados</h3>
-            <p className="empty-state-description">
-              Comience agregando el primer paciente.
-            </p>
-            <button
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">No hay pacientes registrados</h3>
+          <p className="text-gray-500 mb-4">
+            {isDoctor 
+              ? 'Contacta al administrador para agregar pacientes al sistema.' 
+              : 'Comienza agregando tu primer paciente a la plataforma.'}
+          </p>
+          {!isDoctor && (
+            <button 
               onClick={() => setShowForm(true)}
-              className="btn-primary mt-4"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm shadow"
             >
-              <span style={{ fontSize: '14px', marginRight: '8px' }}>➕</span>
-              Agregar Paciente
+              + Agregar primer paciente
             </button>
-          </div>
-        ) : (
-          <div className="table-container">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Nombre del Paciente</th>
-                  <th>Teléfono</th>
-                  <th>Identificación</th>
-                  <th>Edad</th>
-                  <th>Tipo</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody>
-                {patients.map((patient) => (
-                  <tr key={patient.id}>
-                    <td>
-                      <div className="flex items-center">
-                        <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center mr-3">
-                          <span style={{ fontSize: '16px' }}>👤</span>
-                        </div>
-                        <div>
-                          <button
-                            onClick={() => handleOpenPatientFicha(patient)}
-                            className="font-semibold text-blue-600 hover:text-blue-800 text-base text-left hover:underline cursor-pointer transition-colors duration-200 flex items-center group"
-                            title="Hacer clic para ver la ficha del paciente"
-                          >
-                            <span>{patient.first_name || patient.firstName} {patient.last_name || patient.lastName}</span>
-                            <span className="ml-2 text-blue-400 group-hover:text-blue-600 transition-colors duration-200" style={{ fontSize: '12px' }}>🔗</span>
-                          </button>
-                          <div className="text-sm text-gray-500">
-                            {patient.gender === 'Masculino' ? 'Masculino' : patient.gender === 'Femenino' ? 'Femenino' : 'No especificado'}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <div className="text-sm text-gray-900 font-medium">
-                        📱 {patient.mobile_phone || patient.mobilePhone || 'No registrado'}
-                      </div>
-                      {patient.landline_phone || patient.landlinePhone ? (
-                        <div className="text-sm text-gray-500">
-                          ☎️ {patient.landline_phone || patient.landlinePhone}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td>
-                      <div className="text-sm text-gray-900">{patient.identification_type || patient.identificationType}</div>
-                      <div className="text-sm text-gray-500">{patient.identification_number || patient.identificationNumber}</div>
-                    </td>
-                    <td>
-                      <div className="text-sm text-gray-900">{patient.age} años</div>
-                      {patient.isMinor && (
-                        <div className="text-xs text-orange-600">Menor de edad</div>
-                      )}
-                    </td>
-                    <td>
-                      <span className="badge badge-primary">
-                        {patient.patient_type === 'particular' ? 'Particular' :
-                         patient.patient_type === 'eps' ? 'EPS' : 
-                         patient.patient_type === 'prepagada' ? 'Prepagada' : 'Otro'}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="action-buttons">
-                        <button 
-                          className="btn-icon btn-icon-edit"
-                          onClick={() => handleOpenPatientFichaEdit(patient)}
-                        >
-                          Editar
-                        </button>
-                        <button 
-                          className="btn-icon btn-icon-delete"
-                          onClick={() => handleDelete(patient)}
-                        >
-                          Eliminar
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {filteredPatients.map((p) => {
+            const fullName = `${p.first_name || p.firstName || ''} ${p.last_name || p.lastName || ''}`.trim();
+            const initials = (fullName || 'P U').split(' ').map(w => w[0]).slice(0,2).join('').toUpperCase();
+            const ageText = p.age ? `${p.age} años` : '';
+            const lastVisit = p.last_visit || p.lastVisit || '';
+            const allergies = p.allergies || [];
+            const conditions = p.conditions || [];
+            return (
+              <div key={p.id} className="bg-white border rounded-xl p-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 text-sm">{initials}</div>
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">{fullName || 'Paciente'}</div>
+                    <div className="text-xs text-gray-500">{ageText} • Última visita: {lastVisit || '—'}</div>
+                  </div>
+                </div>
+                <div className="mt-3 text-xs text-gray-600">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-gray-500">Alergias:</span>
+                    {(allergies.length ? allergies : ['Ninguna']).map((a, idx) => (
+                      <span key={idx} className={`px-2 py-0.5 rounded-full text-white bg-red-500 text-[11px]`}>{a}</span>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-gray-500">Condiciones:</span>
+                    {(conditions.length ? conditions : ['Ninguna']).map((c, idx) => (
+                      <span key={idx} className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 border text-[11px]">{c}</span>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-3 flex justify-end gap-2">
+                  <button onClick={() => handleOpenPatientFicha(p)} className="text-blue-600 text-xs hover:underline">Ver ficha</button>
+                  {!isDoctor && (
+                    <button onClick={() => handleOpenPatientFichaEdit(p)} className="text-gray-600 text-xs hover:underline">Editar</button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Paginación */}
+      <div className="flex items-center justify-center gap-2 text-sm mt-2">
+        <button disabled={page===1} onClick={() => setPage(p => Math.max(1, p-1))} className="text-gray-500 disabled:opacity-40">‹ Previous</button>
+        {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
+          const num = i + Math.max(1, Math.min(page-2, totalPages-4));
+          return (
+            <button key={num} onClick={() => setPage(num)} className={`w-8 h-8 rounded-md border ${page===num?'bg-blue-600 text-white border-blue-600':'border-gray-200 text-gray-700'}`}>{num}</button>
+          );
+        })}
+        <button disabled={page===totalPages} onClick={() => setPage(p => Math.min(totalPages, p+1))} className="text-gray-500 disabled:opacity-40">Next ›</button>
       </div>
 
       {/* Formulario de Nuevo Paciente */}
-      {showForm && (
+      {showForm && !isDoctor && (
         <div className="modal-overlay">
           <div className="modal" style={{ maxWidth: '800px', maxHeight: '90vh', overflowY: 'auto' }}>
             <div className="modal-header">

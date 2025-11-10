@@ -1,5 +1,12 @@
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import logoGeneral from '../img/logo-general.svg';
+import powered from '../img/powered.svg';
+import iconHome from '../img/home.svg';
+import iconUsers from '../img/gestion-usuarios.svg';
+import iconPerms from '../img/permisos.svg';
+import iconConfig from '../img/configuracion-icon.svg';
+import iconHelp from '../img/ayuda-icon.svg';
 import toast from 'react-hot-toast';
 
 const Layout = ({ children }) => {
@@ -8,31 +15,28 @@ const Layout = ({ children }) => {
   const navigate = useNavigate();
 
   const handleLogout = () => {
-    localStorage.removeItem('token');
+    localStorage.removeItem('authToken');
     localStorage.removeItem('user');
     toast.success('Sesión cerrada exitosamente');
     navigate('/login');
   };
 
   const user = JSON.parse(localStorage.getItem('user') || '{}');
+  const isDoctor = user?.role === 'medical_user';
 
-  const navigation = [
-    { name: 'Agenda', href: '/agenda', icon: '📅' },
-    { name: 'Pacientes', href: '/patients', icon: '👥' },
-    { name: 'Cajas', href: '/cashier', icon: '💰', hidden: true },
-    { name: 'Recaudación', href: '/collections', icon: '💳', hidden: true },
-    { name: 'Administración', href: '/administration', icon: '⚙️' },
-    { name: 'Reportes', href: '/reports', icon: '📊' },
-    { name: 'Módulos', href: '/modules', icon: '🔧', hidden: true },
-    { name: 'CRM', href: '/crm', icon: '📞', hidden: true },
+  const navigation = isDoctor ? [
+    { name: 'Inicio', href: '/doctor/dashboard', icon: iconHome },
+    { name: 'Pacientes', href: '/patients', icon: iconUsers },
+    { name: 'Agenda', href: '/agenda', icon: iconPerms },
+  ] : [
+    { name: 'Inicio', href: '/company-dashboard', icon: iconHome },
+    { name: 'Gestion de usuarios', href: '/user-management', icon: iconUsers },
+    { name: 'Permisos y roles', href: '/permissions', icon: iconPerms },
   ];
 
   const adminNavigation = [
-    { name: 'Especialistas', href: '/specialists', icon: '👨‍⚕️' },
-    { name: 'Especialidades', href: '/specialties', icon: '🏥' },
-    { name: 'Consentimientos', href: '/consents', icon: '🧾' },
-    { name: 'Horarios', href: '/schedules', icon: '📅' },
-    { name: 'Usuarios', href: '/users', icon: '👤' },
+    { name: 'Configuración', href: '/administration', icon: iconConfig },
+    { name: 'Ayuda', href: '/help', icon: iconHelp },
   ];
 
   // Verificar si hay páginas anteriores en el historial
@@ -46,26 +50,20 @@ const Layout = ({ children }) => {
 
   // Mostrar botón de atrás solo si no estamos en una página principal
   const showBackButton = canGoBack && !isMainPage;
+  const isDashboard = location.pathname === '/dashboard';
+  const dateStr = new Date().toLocaleDateString('es-CO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
   return (
     <div className="layout-container">
       {/* Sidebar */}
       <div className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
         <div className="sidebar-header">
-          <h1 className="sidebar-title">RoMedicals</h1>
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="absolute top-4 right-4 text-white hover:text-gray-200 transition-colors"
-            title={sidebarOpen ? 'Ocultar menú' : 'Mostrar menú'}
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-            </svg>
-          </button>
+          <img src={logoGeneral} alt="ROMEDICALS+" className="w-full" />
         </div>
         
-        <nav className="mt-6">
-          {navigation.filter(item => !item.hidden).map((item) => {
+        <nav className="mt-3">
+          <div className="px-6 py-2 text-xs font-bold tracking-[0.2em] text-gray-400">MENU</div>
+          {navigation.map((item) => {
             const isActive = location.pathname === item.href;
             return (
               <Link
@@ -74,18 +72,15 @@ const Layout = ({ children }) => {
                 className={`nav-link ${isActive ? 'active' : ''}`}
                 onClick={() => setSidebarOpen(false)}
               >
-                <span style={{ fontSize: '18px', marginRight: '12px' }}>{item.icon}</span>
-                {item.name}
+                <img src={item.icon} alt="icon" className="nav-icon" />
+                <span className="truncate text-[18px]">{item.name}</span>
               </Link>
             );
           })}
 
-          {/* Menú de Administración */}
-          {location.pathname.startsWith('/administration') && (
-            <div className="mt-6">
-              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 px-6">
-                Administración
-              </h3>
+          {!isDoctor && (
+            <div className="mt-8">
+              <h3 className="px-6 py-2 text-xs font-bold tracking-[0.2em] text-gray-400">Administración</h3>
               {adminNavigation.map((item) => {
                 const isActive = location.pathname === item.href;
                 return (
@@ -95,8 +90,8 @@ const Layout = ({ children }) => {
                     className={`nav-link ${isActive ? 'active' : ''}`}
                     onClick={() => setSidebarOpen(false)}
                   >
-                    <span style={{ fontSize: '16px', marginRight: '12px' }}>{item.icon}</span>
-                    {item.name}
+                    <img src={item.icon} alt="icon" className="nav-icon" />
+                    <span className="truncate text-[18px]">{item.name}</span>
                   </Link>
                 );
               })}
@@ -104,30 +99,14 @@ const Layout = ({ children }) => {
           )}
         </nav>
 
-        {/* User Info */}
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-200 bg-gray-50">
-          <div className="flex items-center">
-            <div className="flex-shrink-0">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-r from-blue-500 to-blue-600 flex items-center justify-center">
-                <span className="text-white text-sm font-semibold">
-                  {user.firstName ? user.firstName.charAt(0).toUpperCase() : 'U'}
-                </span>
-              </div>
-            </div>
-            <div className="ml-3 flex-1">
-              <p className="text-sm font-medium text-gray-900">
-                {user.firstName ? `${user.firstName} ${user.lastName}` : 'Usuario'}
-              </p>
-              <p className="text-xs text-gray-500">{user.email || 'usuario@romedicals.com'}</p>
-            </div>
-            <button
-              onClick={handleLogout}
-              className="text-gray-400 hover:text-gray-600 transition-colors"
-              title="Cerrar sesión"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+        {/* Logout inferior */}
+        <div className="absolute bottom-0 left-0 right-0">
+          <div className="border-t border-gray-200 px-6 py-4">
+            <button onClick={handleLogout} className="w-full flex items-center gap-3 text-orange-500 hover:text-orange-600 font-semibold">
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7" />
               </svg>
+              Logout
             </button>
           </div>
         </div>
@@ -146,51 +125,53 @@ const Layout = ({ children }) => {
         {/* Header */}
         <header className="header">
           <div className="header-content">
-            <div className="flex flex-row items-center">
-              <button
-                onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                </svg>
-              </button>
-              
-              <h1 className="header-title ml-4">
-                {navigation.find(item => item.href === location.pathname)?.name || 
-                 adminNavigation.find(item => item.href === location.pathname)?.name || 
-                 'RoMedicals'}
-              </h1>
-            </div>
-
-            <div className="header-actions">
-              <div className="flex items-center space-x-4">
-                {/* Notifications */}
-                <button className="relative p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors">
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-5 5v-5zM4.19 4.19C4.19 4.19 4.19 4.19 4.19 4.19M4.19 4.19C4.19 4.19 4.19 4.19 4.19 4.19M4.19 4.19C4.19 4.19 4.19 4.19 4.19 4.19" />
-                  </svg>
-                  <span className="absolute top-1 right-1 block h-2 w-2 rounded-full bg-red-400"></span>
+            {isDashboard ? (
+              <div className="flex items-center w-full">
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  title="Abrir menú"
+                  className="w-12 h-12 rounded-2xl bg-gray-100 flex items-center justify-center mr-4 hover:bg-gray-200 transition-colors"
+                >
+                  <img src={iconHome} alt="Abrir menú" className="w-5 h-5" />
                 </button>
-
-                {/* User menu */}
-                <div className="relative">
-                  <button className="flex items-center space-x-2 text-gray-700 hover:text-gray-900 transition-colors">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-r from-blue-500 to-blue-600 flex items-center justify-center">
-                      <span className="text-white text-sm font-semibold">
-                        {user.firstName ? user.firstName.charAt(0).toUpperCase() : 'U'}
-                      </span>
-                    </div>
-                    <span className="hidden md:block text-sm font-medium">
-                      {user.firstName ? `${user.firstName} ${user.lastName}` : 'Usuario'}
-                    </span>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
+                <div>
+                  <h1 className="text-[22px] font-semibold text-gray-900 leading-6">Panel de Administrador</h1>
+                  <p className="text-sm text-gray-500 mt-1">{user.firstName ? `Dr.  ${user.firstName} ${user.lastName}` : 'Administrador'} – {dateStr.charAt(0).toUpperCase() + dateStr.slice(1)}</p>
                 </div>
               </div>
-            </div>
+            ) : (
+              <div className="flex flex-row items-center w-full justify-between">
+                <div className="flex items-center">
+                  <button
+                    onClick={() => setSidebarOpen(!sidebarOpen)}
+                    className="p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
+                  >
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                    </svg>
+                  </button>
+                  <h1 className="header-title ml-4">
+                    {navigation.find(item => item.href === location.pathname)?.name || 'RoMedicals'}
+                  </h1>
+                </div>
+                <div className="header-actions">
+                  <div className="flex items-center space-x-4">
+                    <div className="relative">
+                      <button className="flex items-center space-x-2 text-gray-700 hover:text-gray-900 transition-colors">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-r from-blue-500 to-blue-600 flex items-center justify-center">
+                          <span className="text-white text-sm font-semibold">
+                            {user.firstName ? user.firstName.charAt(0).toUpperCase() : 'U'}
+                          </span>
+                        </div>
+                        <span className="hidden md:block text-sm font-medium">
+                          {user.firstName ? `${user.firstName} ${user.lastName}` : 'Usuario'}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </header>
 

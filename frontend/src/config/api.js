@@ -32,18 +32,20 @@ const api = axios.create({
 
 // Interceptor para agregar token de autenticación
 api.interceptors.request.use(
-  (config) => {
-    let tokenKey = config.AUTH_TOKEN_KEY;
+  (axiosConfig) => {
+    // Obtener la clave del token de la configuración
+    let tokenKey = config.AUTH_TOKEN_KEY || 'authToken';
     try {
       if (typeof window !== 'undefined' && window.ROMEDICALS_CONFIG?.AUTH?.TOKEN_KEY) {
         tokenKey = window.ROMEDICALS_CONFIG.AUTH.TOKEN_KEY || tokenKey;
       }
     } catch (_) {}
+    
     const token = typeof window !== 'undefined' ? localStorage.getItem(tokenKey) : null;
     if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+      axiosConfig.headers.Authorization = `Bearer ${token}`;
     }
-    return config;
+    return axiosConfig;
   },
   (error) => {
     return Promise.reject(error);
@@ -56,11 +58,26 @@ api.interceptors.response.use(
     return response;
   },
   (error) => {
-    if (error.response?.status === 401) {
-      // Token expirado o inválido
-      localStorage.removeItem(config.AUTH_TOKEN_KEY);
-      localStorage.removeItem(config.USER_DATA_KEY);
-      window.location.href = config.ROUTES.LOGIN;
+    // Manejar errores de autenticación (401) y autorización (403)
+    const isAuthError = error.response?.status === 401 || error.response?.status === 403;
+    const isLoginEndpoint = error.config?.url?.includes('/auth/login');
+    
+    if (isAuthError && !isLoginEndpoint) {
+      // Token expirado, inválido o sin permisos
+      console.error('Error de autenticación:', error.response?.data);
+      const tokenKey = config.AUTH_TOKEN_KEY || 'authToken';
+      localStorage.removeItem(tokenKey);
+      localStorage.removeItem(config.USER_DATA_KEY || 'user');
+      
+      // Si es 403 (Token inválido), también redirigir al login
+      if (error.response?.status === 403) {
+        // Mostrar mensaje específico
+        if (error.response?.data?.message) {
+          console.error('Mensaje del servidor:', error.response.data.message);
+        }
+      }
+      
+      window.location.href = config.ROUTES.LOGIN || '/login';
     }
     return Promise.reject(error);
   }
@@ -71,6 +88,24 @@ export const authAPI = {
   login: (credentials) => api.post('/auth/login', credentials),
   logout: () => api.post('/auth/logout'),
   getProfile: () => api.get('/auth/me'),
+};
+
+// Funciones de administración ROMEDICALS
+export const adminAPI = {
+  getSuperAdmins: () => api.get('/admin/superadmins'),
+  createSuperAdmin: (data) => api.post('/admin/superadmins', data),
+  updateSuperAdmin: (id, data) => api.put(`/admin/superadmins/${id}`, data),
+  deleteSuperAdmin: (id) => api.delete(`/admin/superadmins/${id}`),
+  resetSuperAdminPassword: (id) => api.post(`/admin/superadmins/${id}/reset-password`),
+  getStats: () => api.get('/admin/stats'),
+  getCompanies: () => api.get('/admin/companies'),
+  setupRomedicalsAdmin: (data) => api.post('/admin/setup-romedicals-admin', data),
+};
+
+// Funciones de onboarding
+export const onboardingAPI = {
+  finalize: (data) => api.post('/onboarding/finalize', data),
+  completeDoctor: () => api.post('/doctor-onboarding/complete'),
 };
 
 // Funciones de pacientes
@@ -148,6 +183,15 @@ export const specialtiesAPI = {
   deleteTemplate: (id, type, templateId) => api.delete(`/specialties/${id}/templates/${type}/${templateId}`),
 };
 
+// Funciones de plantillas de consulta
+export const consultationTemplatesAPI = {
+  getAll: () => api.get('/consultation-templates'),
+  getById: (id) => api.get(`/consultation-templates/${id}`),
+  create: (data) => api.post('/consultation-templates', data),
+  update: (id, data) => api.put(`/consultation-templates/${id}`, data),
+  delete: (id) => api.delete(`/consultation-templates/${id}`),
+};
+
 // Funciones de especialistas
 export const specialistsAPI = {
   getAll: () => api.get('/specialists'),
@@ -197,12 +241,15 @@ export const aiAPI = {
 export const usersAPI = {
   getAll: (params) => api.get('/users', { params }),
   getById: (id) => api.get(`/users/${id}`),
+  getProfile: () => api.get('/users/profile'),
   create: (data) => api.post('/users', data),
   update: (id, data) => api.put(`/users/${id}`, data),
   delete: (id) => api.delete(`/users/${id}`),
   updateStatus: (id, status) => api.patch(`/users/${id}/status`, { status }),
   resetPassword: (id) => api.post(`/users/${id}/reset-password`),
   getDoctors: () => api.get('/users/doctors/list'),
+  createDoctor: (data) => api.post('/users/doctors', data),
+  updateDoctorPassword: (id, data) => api.patch(`/users/doctors/${id}/onboarding`, data),
 };
 
 // Funciones de archivos

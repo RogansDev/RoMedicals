@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  # Base de datos MySQL
+  mysql:
+    image: mysql:8.0
+    container_name: romedicals_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: romedicals_root_password
+      MYSQL_DATABASE: romedicals_main
+      MYSQL_USER: romedicals_user
+      MYSQL_PASSWORD: romedicals_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --default-authentication-plugin=mysql_native_password
+    restart: unless-stopped
+    networks:
+      - romedicals_network
+
+  # Backend API
+  backend:
+    build: .
+    container_name: romedicals_backend
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DB_HOST: mysql
+      DB_USER: romedicals_user
+      DB_PASSWORD: romedicals_password
+      DB_NAME: romedicals_main
+      JWT_SECRET: romedicals_development_secret_key
+      FRONTEND_URL: http://localhost:3000
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./backups:/app/backups
+      - ./logs:/app/logs
+    depends_on:
+      - mysql
+    restart: unless-stopped
+    networks:
+      - romedicals_network
+
+  # Redis para cache (opcional)
+  redis:
+    image: redis:7-alpine
+    container_name: romedicals_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - romedicals_network
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  romedicals_network:
+    driver: bridge

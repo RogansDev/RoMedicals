@@ -64,12 +64,25 @@ class PatientService {
         headers: this.getHeaders()
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Error al obtener los pacientes');
+      // Leer como texto primero y luego intentar parsear JSON de forma segura
+      const rawBody = await response.text();
+      let data;
+      try {
+        data = rawBody ? JSON.parse(rawBody) : {};
+      } catch (e) {
+        data = { message: rawBody };
       }
 
-      return await response.json();
+      if (!response.ok) {
+        const error = new Error(
+          (data && (data.message || data.error)) || `Error al obtener los pacientes (${response.status})`
+        );
+        error.status = response.status;
+        error.payload = data;
+        throw error;
+      }
+
+      return data;
     } catch (error) {
       console.error('Error en getPatients:', error);
       throw error;

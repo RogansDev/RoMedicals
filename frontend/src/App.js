@@ -1,7 +1,13 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import Login from './components/Login';
+import Onboarding from './components/Onboarding';
+import DoctorOnboarding from './components/DoctorOnboarding';
+import AdminDashboard from './components/AdminDashboard';
+import RomedicalsDashboard from './components/RomedicalsDashboard';
+import CredentialsSetup from './components/CredentialsSetup';
+import QuickCredentialsFix from './components/QuickCredentialsFix';
 import Layout from './components/Layout';
 import Dashboard from './components/Dashboard';
 import Agenda from './components/Agenda';
@@ -12,17 +18,45 @@ import Consents from './components/Consents';
 import SpecialistSchedule from './components/SpecialistSchedule';
 import Patients from './components/Patients';
 import Administration from './components/Administration';
+import Configuration from './components/Configuration';
+import DoctorDashboard from './components/DoctorDashboard';
+import Permissions from './components/Permissions';
+import UserManagement from './components/UserManagement';
+import NuevoEspecialistaPage from './components/NuevoEspecialistaPage';
+import NuevoPacientePage from './components/NuevoPacientePage';
+import UserDetails from './components/UserDetails';
+import MedicalConsultation from './components/MedicalConsultation';
+import NewConsultation from './components/NewConsultation';
 
-// Componente para rutas protegidas
-const ProtectedRoute = ({ children }) => {
+// Componente para rutas protegidas por autenticación y/o rol
+const ProtectedRoute = ({ children, allowRoles = null, redirectTo = '/login' }) => {
   const token = localStorage.getItem('authToken');
-  return token ? children : <Navigate to="/login" replace />;
+  const userRaw = localStorage.getItem('user');
+  const user = (() => { try { return JSON.parse(userRaw || 'null'); } catch { return null; } })();
+  const isAllowed = !!token && (!allowRoles || (user && allowRoles.includes(user.role)));
+  return isAllowed ? children : <Navigate to={redirectTo} replace />;
 };
 
-// Componente para rutas públicas (solo si no está autenticado)
+// Componente para rutas públicas (redirige si ya autenticado)
 const PublicRoute = ({ children }) => {
   const token = localStorage.getItem('authToken');
-  return token ? <Navigate to="/agenda" replace /> : children;
+  const userRaw = localStorage.getItem('user');
+  const user = (() => { try { return JSON.parse(userRaw || 'null'); } catch { return null; } })();
+  
+  if (token && user) {
+    // Redirigir según el rol del usuario
+    if (user.role === 'romedicals_admin') {
+      return <Navigate to="/dashboard" replace />;
+    } else if (user.role === 'super_user') {
+      return <Navigate to="/company-dashboard" replace />;
+    } else if (user.role === 'medical_user') {
+      return <Navigate to="/doctor/dashboard" replace />;
+    } else {
+      return <Navigate to="/agenda" replace />;
+    }
+  }
+  
+  return children;
 };
 
 function App() {
@@ -55,7 +89,7 @@ function App() {
         />
         
         <Routes>
-          {/* Ruta pública */}
+          {/* Login general */}
           <Route
             path="/login"
             element={
@@ -64,27 +98,115 @@ function App() {
               </PublicRoute>
             }
           />
+
+          {/* Login para Superadmin -> solo permite rol super_user */}
+          <Route
+            path="/admin"
+            element={
+              <PublicRoute>
+                <Login expectedRole="super_user" postLoginRedirect="/company-dashboard" />
+              </PublicRoute>
+            }
+          />
+
+          {/* Login para Médico -> solo permite rol medical_user */}
+          <Route
+            path="/doctor"
+            element={
+              <PublicRoute>
+                <Login expectedRole="medical_user" postLoginRedirect="/agenda" />
+              </PublicRoute>
+            }
+          />
+
+          {/* Onboarding - Solo para super_users que necesitan configuración inicial */}
+          <Route
+            path="/onboarding"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
+                <Onboarding />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Doctor Onboarding - Para médicos que necesitan configuración inicial */}
+          <Route
+            path="/doctor-onboarding"
+            element={<DoctorOnboarding />}
+          />
           
           {/* Agenda - Dashboard principal */}
           <Route
             path="/agenda"
             element={
-              <ProtectedRoute>
+              <ProtectedRoute allowRoles={["super_user", "medical_user", "administrative", "nursing"]}>
                 <Layout>
                   <Agenda />
                 </Layout>
               </ProtectedRoute>
             }
           />
+
+          {/* Dashboard Médico */}
+          <Route
+            path="/doctor/dashboard"
+            element={
+              <ProtectedRoute allowRoles={["medical_user"]}>
+                <Layout>
+                  <DoctorDashboard />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
           
-          {/* Dashboard original */}
+          {/* Dashboard ROMEDICALS - Solo para romedicals_admin */}
           <Route
             path="/dashboard"
             element={
-              <ProtectedRoute>
+              <ProtectedRoute allowRoles={["romedicals_admin"]}>
+                <RomedicalsDashboard />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Dashboard de Empresa Cliente - Solo para super_user */}
+          <Route
+            path="/company-dashboard"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
                 <Layout>
                   <Dashboard />
                 </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Dashboard de Administración de Superadmins - Solo para ROMEDICALS */}
+          <Route
+            path="/admin-dashboard"
+            element={
+              <ProtectedRoute allowRoles={["romedicals_admin"]}>
+                <AdminDashboard />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Configuración de Credenciales ROMEDICALS - Accesible para cualquier usuario autenticado */}
+          <Route
+            path="/setup-credentials"
+            element={
+              <ProtectedRoute allowRoles={null}>
+                <CredentialsSetup />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Configuración Rápida de Credenciales - Sin restricciones */}
+          <Route
+            path="/fix-credentials"
+            element={
+              <ProtectedRoute allowRoles={null}>
+                <QuickCredentialsFix />
               </ProtectedRoute>
             }
           />
@@ -96,6 +218,28 @@ function App() {
               <ProtectedRoute>
                 <Layout>
                   <PatientFicha />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Consulta médica */}
+          <Route
+            path="/consultation/:patientId"
+            element={
+              <ProtectedRoute allowRoles={["medical_user"]}>
+                <MedicalConsultation />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Nueva consulta - selección de paciente */}
+          <Route
+            path="/new-consultation"
+            element={
+              <ProtectedRoute allowRoles={["medical_user"]}>
+                <Layout>
+                  <NewConsultation />
                 </Layout>
               </ProtectedRoute>
             }
@@ -137,6 +281,66 @@ function App() {
             }
           />
 
+          {/* Gestión de usuarios */}
+          <Route
+            path="/user-management"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
+                <Layout>
+                  <UserManagement />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Nuevo especialista */}
+          <Route
+            path="/user-management/new-specialist"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
+                <Layout>
+                  <NuevoEspecialistaPage />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Nuevo paciente */}
+          <Route
+            path="/user-management/new-patient"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
+                <Layout>
+                  <NuevoPacientePage />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Detalles de usuario */}
+          <Route
+            path="/user-details/:userId"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
+                <Layout>
+                  <UserDetails />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Permisos y roles */}
+          <Route
+            path="/permissions"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
+                <Layout>
+                  <Permissions />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+
           {/* Horarios de Especialistas */}
           <Route
             path="/schedules"
@@ -161,13 +365,13 @@ function App() {
             }
           />
 
-          {/* Administración */}
+          {/* Configuración */}
           <Route
             path="/administration"
             element={
-              <ProtectedRoute>
+              <ProtectedRoute allowRoles={["super_user"]}>
                 <Layout>
-                  <Administration />
+                  <Configuration />
                 </Layout>
               </ProtectedRoute>
             }
@@ -268,7 +472,7 @@ function App() {
           {/* Ruta por defecto */}
           <Route
             path="/"
-            element={<Navigate to="/agenda" replace />}
+            element={<Navigate to="/login" replace />}
           />
           
           {/* Ruta 404 */}

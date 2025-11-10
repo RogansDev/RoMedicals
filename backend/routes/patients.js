@@ -76,6 +76,7 @@ const medicalHistorySchema = Joi.object({
 // GET /api/patients - Listar pacientes con filtros
 router.get('/', authenticateToken, requirePermission('PATIENTS', 'READ'), async (req, res) => {
   try {
+    console.log('🔎 GET /api/patients called with query:', req.query);
     const { 
       page = 1, 
       limit = 20, 
@@ -116,6 +117,7 @@ router.get('/', authenticateToken, requirePermission('PATIENTS', 'READ'), async 
     }
 
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+    console.log('🧩 whereClause:', whereClause);
 
     // Validar ordenamiento
     const allowedSortFields = ['first_name', 'last_name', 'identification_number', 'birth_date', 'created_at'];
@@ -130,6 +132,7 @@ router.get('/', authenticateToken, requirePermission('PATIENTS', 'READ'), async 
       FROM patients p 
       ${whereClause}
     `;
+    console.log('🧮 countQuery params:', queryParams);
     const countResult = await query(countQuery, queryParams);
     const total = parseInt(countResult.rows[0].total);
 
@@ -151,17 +154,15 @@ router.get('/', authenticateToken, requirePermission('PATIENTS', 'READ'), async 
         p.blood_type,
         p.patient_type,
         p.created_at,
-        p.updated_at,
-        COUNT(a.id) as appointments_count
+        p.updated_at
       FROM patients p
-      LEFT JOIN appointments a ON p.id = a.patient_id
       ${whereClause}
-      GROUP BY p.id
       ORDER BY p.${finalSortBy} ${finalSortOrder}
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
     
     queryParams.push(parseInt(limit), offset);
+    console.log('📄 mainQuery params:', queryParams);
     const patientsResult = await query(mainQuery, queryParams);
 
     const patients = patientsResult.rows.map(patient => ({
@@ -185,10 +186,10 @@ router.get('/', authenticateToken, requirePermission('PATIENTS', 'READ'), async 
     });
 
   } catch (error) {
-    console.error('Error obteniendo pacientes:', error);
+    console.error('❌ Error obteniendo pacientes:', error.message, error.stack);
     res.status(500).json({
       error: 'Error interno del servidor',
-      message: 'Ocurrió un error al obtener los pacientes'
+      message: error.message || 'Ocurrió un error al obtener los pacientes'
     });
   }
 });
