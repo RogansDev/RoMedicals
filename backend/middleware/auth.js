@@ -17,34 +17,51 @@ const authenticateToken = async (req, res, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
     
-    // Verificar que el usuario existe y está activo
-    const userResult = await query(
-      'SELECT id, email, role, is_active, last_login FROM users WHERE id = $1',
-      [decoded.userId]
-    );
+    // Intentar verificar que el usuario existe y está activo en PostgreSQL
+    // Si no existe en PostgreSQL, usar la información del token (puede estar en MySQL)
+    try {
+      const userResult = await query(
+        'SELECT id, email, role, is_active, last_login FROM users WHERE id = $1',
+        [decoded.userId]
+      );
 
-    if (userResult.rows.length === 0) {
-      return res.status(401).json({ 
-        error: 'Usuario no encontrado',
-        message: 'El usuario asociado al token no existe'
-      });
+      if (userResult.rows.length > 0) {
+        const user = userResult.rows[0];
+        
+        if (!user.is_active) {
+          return res.status(401).json({ 
+            error: 'Usuario inactivo',
+            message: 'Su cuenta ha sido desactivada'
+          });
+        }
+
+        // Agregar información del usuario al request
+        req.user = {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+          companyId: decoded.companyId // Incluir companyId del token
+        };
+      } else {
+        // Usuario no encontrado en PostgreSQL, usar información del token
+        // Esto puede pasar si el usuario está en MySQL (base de datos de empresas)
+        req.user = {
+          id: decoded.userId,
+          email: decoded.email,
+          role: decoded.role,
+          companyId: decoded.companyId // Incluir companyId del token
+        };
+      }
+    } catch (dbError) {
+      // Si hay error de base de datos, usar información del token
+      console.warn('No se pudo verificar usuario en PostgreSQL, usando información del token:', dbError.message);
+      req.user = {
+        id: decoded.userId,
+        email: decoded.email,
+        role: decoded.role,
+        companyId: decoded.companyId // Incluir companyId del token
+      };
     }
-
-    const user = userResult.rows[0];
-    
-    if (!user.is_active) {
-      return res.status(401).json({ 
-        error: 'Usuario inactivo',
-        message: 'Su cuenta ha sido desactivada'
-      });
-    }
-
-    // Agregar información del usuario al request
-    req.user = {
-      id: user.id,
-      email: user.email,
-      role: user.role
-    };
 
     next();
   } catch (error) {

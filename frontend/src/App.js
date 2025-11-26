@@ -27,6 +27,7 @@ import NuevoPacientePage from './components/NuevoPacientePage';
 import UserDetails from './components/UserDetails';
 import MedicalConsultation from './components/MedicalConsultation';
 import NewConsultation from './components/NewConsultation';
+import DoctorScheduleConfig from './components/DoctorScheduleConfig';
 
 // Componente para rutas protegidas por autenticación y/o rol
 const ProtectedRoute = ({ children, allowRoles = null, redirectTo = '/login' }) => {
@@ -228,7 +229,9 @@ function App() {
             path="/consultation/:patientId"
             element={
               <ProtectedRoute allowRoles={["medical_user"]}>
-                <MedicalConsultation />
+                <Layout>
+                  <MedicalConsultation />
+                </Layout>
               </ProtectedRoute>
             }
           />
@@ -313,6 +316,16 @@ function App() {
                 <Layout>
                   <NuevoPacientePage />
                 </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Configuración de horario de médico */}
+          <Route
+            path="/user-management/doctor-schedule/:doctorId?"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
+                <DoctorScheduleConfig />
               </ProtectedRoute>
             }
           />

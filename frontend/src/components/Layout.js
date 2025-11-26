@@ -2,11 +2,9 @@ import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import logoGeneral from '../img/logo-general.svg';
 import powered from '../img/powered.svg';
-import iconHome from '../img/home.svg';
-import iconUsers from '../img/gestion-usuarios.svg';
-import iconPerms from '../img/permisos.svg';
 import iconConfig from '../img/configuracion-icon.svg';
 import iconHelp from '../img/ayuda-icon.svg';
+import { HomeIcon, UsersIcon, CalendarIcon, MenuSidebarIcon } from './icons/AppIcons';
 import toast from 'react-hot-toast';
 
 const Layout = ({ children }) => {
@@ -25,13 +23,13 @@ const Layout = ({ children }) => {
   const isDoctor = user?.role === 'medical_user';
 
   const navigation = isDoctor ? [
-    { name: 'Inicio', href: '/doctor/dashboard', icon: iconHome },
-    { name: 'Pacientes', href: '/patients', icon: iconUsers },
-    { name: 'Agenda', href: '/agenda', icon: iconPerms },
+    { name: 'Inicio', href: '/doctor/dashboard', Icon: HomeIcon },
+    { name: 'Pacientes', href: '/patients', Icon: UsersIcon },
+    { name: 'Agenda', href: '/agenda', Icon: CalendarIcon },
   ] : [
-    { name: 'Inicio', href: '/company-dashboard', icon: iconHome },
-    { name: 'Gestion de usuarios', href: '/user-management', icon: iconUsers },
-    { name: 'Permisos y roles', href: '/permissions', icon: iconPerms },
+    { name: 'Inicio', href: '/company-dashboard', Icon: HomeIcon },
+    { name: 'Gestion de usuarios', href: '/user-management', Icon: UsersIcon },
+    { name: 'Permisos y roles', href: '/permissions', Icon: CalendarIcon },
   ];
 
   const adminNavigation = [
@@ -50,8 +48,35 @@ const Layout = ({ children }) => {
 
   // Mostrar botón de atrás solo si no estamos en una página principal
   const showBackButton = canGoBack && !isMainPage;
-  const isDashboard = location.pathname === '/dashboard';
+  const isDashboard = location.pathname === '/dashboard' || location.pathname === '/doctor/dashboard' || location.pathname === '/company-dashboard';
+  const isConsultation = location.pathname.startsWith('/consultation/');
   const dateStr = new Date().toLocaleDateString('es-CO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  
+  // Título del dashboard según el rol
+  const getDashboardTitle = () => {
+    if (isDoctor) return 'Dashboard Médico';
+    return 'Dashboard Administrativo';
+  };
+  
+  // Subtítulo del dashboard según el rol
+  const getDashboardSubtitle = () => {
+    if (isDoctor) {
+      const doctorName = user.firstName ? `Dr. ${user.firstName} ${user.lastName}` : 'Médico';
+      return `${doctorName} - ${dateStr.charAt(0).toUpperCase() + dateStr.slice(1)}`;
+    }
+    // Para superadmin mostrar nombre de empresa
+    const companyName = user.companyName || user.company_name || 'Empresa';
+    return `${companyName} - ${dateStr.charAt(0).toUpperCase() + dateStr.slice(1)}`;
+  };
+  
+  // Título para la consulta médica
+  const getConsultationTitle = () => 'Consulta médica en curso';
+  
+  // Subtítulo para la consulta médica
+  const getConsultationSubtitle = () => {
+    const doctorName = user.firstName ? `Dr. ${user.firstName} ${user.lastName}` : 'Médico';
+    return `${doctorName} - ${dateStr.charAt(0).toUpperCase() + dateStr.slice(1)}`;
+  };
 
   return (
     <div className="layout-container">
@@ -65,14 +90,19 @@ const Layout = ({ children }) => {
           <div className="px-6 py-2 text-xs font-bold tracking-[0.2em] text-gray-400">MENU</div>
           {navigation.map((item) => {
             const isActive = location.pathname === item.href;
+            const IconComponent = item.Icon;
             return (
               <Link
                 key={item.name}
                 to={item.href}
                 className={`nav-link ${isActive ? 'active' : ''}`}
-                onClick={() => setSidebarOpen(false)}
               >
-                <img src={item.icon} alt="icon" className="nav-icon" />
+                <IconComponent 
+                  width={20} 
+                  height={20} 
+                  stroke={isActive ? '#2563EB' : '#9A9A9A'} 
+                  className="nav-icon"
+                />
                 <span className="truncate text-[18px]">{item.name}</span>
               </Link>
             );
@@ -88,7 +118,6 @@ const Layout = ({ children }) => {
                     key={item.name}
                     to={item.href}
                     className={`nav-link ${isActive ? 'active' : ''}`}
-                    onClick={() => setSidebarOpen(false)}
                   >
                     <img src={item.icon} alt="icon" className="nav-icon" />
                     <span className="truncate text-[18px]">{item.name}</span>
@@ -125,58 +154,36 @@ const Layout = ({ children }) => {
         {/* Header */}
         <header className="header">
           <div className="header-content">
-            {isDashboard ? (
-              <div className="flex items-center w-full">
+            <div className="flex flex-row items-center w-full justify-between">
+              <div className="flex items-center">
                 <button
-                  onClick={() => setSidebarOpen(true)}
-                  title="Abrir menú"
-                  className="w-12 h-12 rounded-2xl bg-gray-100 flex items-center justify-center mr-4 hover:bg-gray-200 transition-colors"
+                  onClick={() => setSidebarOpen(!sidebarOpen)}
+                  className="rounded-md transition-colors"
                 >
-                  <img src={iconHome} alt="Abrir menú" className="w-5 h-5" />
+                  <MenuSidebarIcon width={44} height={44} />
                 </button>
-                <div>
-                  <h1 className="text-[22px] font-semibold text-gray-900 leading-6">Panel de Administrador</h1>
-                  <p className="text-sm text-gray-500 mt-1">{user.firstName ? `Dr.  ${user.firstName} ${user.lastName}` : 'Administrador'} – {dateStr.charAt(0).toUpperCase() + dateStr.slice(1)}</p>
-                </div>
-              </div>
-            ) : (
-              <div className="flex flex-row items-center w-full justify-between">
-                <div className="flex items-center">
-                  <button
-                    onClick={() => setSidebarOpen(!sidebarOpen)}
-                    className="p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
-                  >
-                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                    </svg>
-                  </button>
+                {isDashboard ? (
+                  <div className="ml-4">
+                    <h1 className="text-[22px] font-semibold text-gray-900 leading-6">{getDashboardTitle()}</h1>
+                    <p className="text-sm text-gray-500 mt-1">{getDashboardSubtitle()}</p>
+                  </div>
+                ) : isConsultation ? (
+                  <div className="ml-4">
+                    <h1 className="text-[22px] font-semibold text-gray-900 leading-6">{getConsultationTitle()}</h1>
+                    <p className="text-sm text-gray-500 mt-1">{getConsultationSubtitle()}</p>
+                  </div>
+                ) : (
                   <h1 className="header-title ml-4">
                     {navigation.find(item => item.href === location.pathname)?.name || 'RoMedicals'}
                   </h1>
-                </div>
-                <div className="header-actions">
-                  <div className="flex items-center space-x-4">
-                    <div className="relative">
-                      <button className="flex items-center space-x-2 text-gray-700 hover:text-gray-900 transition-colors">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-r from-blue-500 to-blue-600 flex items-center justify-center">
-                          <span className="text-white text-sm font-semibold">
-                            {user.firstName ? user.firstName.charAt(0).toUpperCase() : 'U'}
-                          </span>
-                        </div>
-                        <span className="hidden md:block text-sm font-medium">
-                          {user.firstName ? `${user.firstName} ${user.lastName}` : 'Usuario'}
-                        </span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                )}
               </div>
-            )}
+            </div>
           </div>
         </header>
 
         {/* Back Button */}
-        <div className="px-6 py-3 border-b border-gray-200 bg-gray-50 mb-4">
+        <div className="px-6 pt-4 mb-4">
           {showBackButton && (
             <button
               onClick={() => navigate(-1)}

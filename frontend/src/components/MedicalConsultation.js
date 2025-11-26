@@ -1,14 +1,29 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import patientService from '../services/patientService';
+import appointmentService from '../services/appointmentService';
 import api, { consultationTemplatesAPI } from '../config/api';
 import toast from 'react-hot-toast';
 import OverlaySelect from './OverlaySelect';
+import { MeetingProvider, useMeeting, useParticipant } from '@videosdk.live/react-sdk';
+import {
+  MicIconActive,
+  MicIconInactive,
+  CameraIconActive,
+  CameraIconInactive,
+  ShareScreenIcon,
+  ChatIcon,
+  ClipIcon,
+  SendArrowIcon,
+  UserIcon,
+  CloseXIcon
+} from './icons/VideoCallIcons';
+import { MicrophoneIcon, BrainIcon, DocumentIcon, AllergyIcon, ConditionsIcon, ArrowRightIcon } from './icons/AppIcons';
 
 const MedicalConsultation = () => {
   const { patientId } = useParams();
-  const [activeTab, setActiveTab] = useState('tipo-consulta');
-  const [unlockedTabs, setUnlockedTabs] = useState(['tipo-consulta']); // Pestañas desbloqueadas
+  const [activeTab, setActiveTab] = useState('consulta');
+  const [unlockedTabs, setUnlockedTabs] = useState(['consulta']); // Pestañas desbloqueadas
   const [patient, setPatient] = useState(null);
   const [loading, setLoading] = useState(true);
   const [templates, setTemplates] = useState([]);
@@ -26,6 +41,7 @@ const MedicalConsultation = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
+  const [testTranscript, setTestTranscript] = useState(''); // Para pruebas manuales
   
   const mediaRecorderRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -55,22 +71,204 @@ const MedicalConsultation = () => {
 
   // Estados para CIE-10
   const [cie10Options, setCie10Options] = useState([]);
+  const cie10OptionsRef = useRef([]); // Ref para acceso sincrónico en callbacks
   const [cie10Loading, setCie10Loading] = useState(false);
   const [cie10Error, setCie10Error] = useState('');
   const [secondaryCodes, setSecondaryCodes] = useState([]);
   const [secondarySelect, setSecondarySelect] = useState('');
   
-  // Datos de fórmula médica
-  const [medications, setMedications] = useState([]);
-  const [medicationSearch, setMedicationSearch] = useState('');
+  // Mantener ref actualizada cuando cambie cie10Options
+  useEffect(() => {
+    cie10OptionsRef.current = cie10Options;
+  }, [cie10Options]);
+  
+  // Debug: Ver cambios en ripsData
+  useEffect(() => {
+    console.log('🔄 ripsData actualizado:', ripsData);
+  }, [ripsData]);
+  
 
-  // Cargar datos del paciente
+  // Estado para la cita actual y modalidad
+  const [currentAppointment, setCurrentAppointment] = useState(null);
+  const [isTelemedicine, setIsTelemedicine] = useState(false);
+  
+  // Estados para VideoSDK
+  const [meetingId, setMeetingId] = useState(null);
+  const [token, setToken] = useState(null);
+  const [isMeetingJoined, setIsMeetingJoined] = useState(false);
+  
+  // Estados para el chat
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [newMessage, setNewMessage] = useState('');
+  const chatMessagesEndRef = useRef(null);
+  
+  // VideoSDK API Key - Debe configurarse en variables de entorno
+  const VIDEO_SDK_API_KEY = process.env.REACT_APP_VIDEOSDK_API_KEY || 'YOUR_API_KEY_HERE';
+  
+  // Token de VideoSDK (temporal - en producción debe generarse desde el backend)
+  const VIDEO_SDK_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcGlrZXkiOiIyNGE1ZGFkZS00NzI0LTQzZDUtYmQ0YS1lMGFiYzY1YmE5ZTciLCJwZXJtaXNzaW9ucyI6WyJhbGxvd19qb2luIl0sImlhdCI6MTcyNDk2NDY2OSwiZXhwIjoxNzI1NTY5NDY5fQ.yT6z5tMkqYgRDlSjCMT1WIcHbXDtwpv6jJfhL7VeNZI';
+  
+  // Función para verificar si el token está expirado
+  const isTokenExpired = (token) => {
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      const exp = payload.exp;
+      const now = Math.floor(Date.now() / 1000);
+      return now >= exp;
+    } catch (error) {
+      console.error('Error verificando token:', error);
+      return true; // Si no se puede verificar, asumir que está expirado
+    }
+  };
+  
+  // Debug: Ver cambios en isTelemedicine (después de declarar el estado)
+  useEffect(() => {
+    console.log('🔄 isTelemedicine cambió a:', isTelemedicine);
+    console.log('🔄 currentAppointment:', currentAppointment);
+  }, [isTelemedicine, currentAppointment]);
+
+  // Cargar datos del paciente y cita actual
   useEffect(() => {
     const loadPatientData = async () => {
       try {
         setLoading(true);
         const patientData = await patientService.getPatientById(patientId);
         setPatient(patientData.patient);
+        
+        // Obtener la cita del día actual para este paciente
+        const today = new Date();
+        const year = today.getFullYear();
+        const month = String(today.getMonth() + 1).padStart(2, '0');
+        const day = String(today.getDate()).padStart(2, '0');
+        const todayStr = `${year}-${month}-${day}`;
+        
+        try {
+          // Primero intentar buscar citas del día actual
+          let appointmentsResponse = await appointmentService.getAppointments({
+            patientId: patientId,
+            dateFrom: todayStr,
+            dateTo: todayStr
+          });
+          
+          let appointments = appointmentsResponse.appointments || appointmentsResponse.data?.appointments || [];
+          console.log('📅 Citas encontradas para el día:', appointments.length);
+          console.log('📅 Detalles de citas del día:', appointments.map(apt => ({
+            id: apt.id,
+            date: apt.appointment_date || apt.appointmentDate,
+            time: apt.appointment_time || apt.appointmentTime,
+            modality: apt.modality,
+            type: apt.type
+          })));
+          
+          // Si no hay citas del día, buscar todas las citas del paciente (últimos 7 días)
+          if (appointments.length === 0) {
+            console.log('⚠️ No hay citas para el día actual, buscando en los últimos 7 días...');
+            const weekAgo = new Date();
+            weekAgo.setDate(weekAgo.getDate() - 7);
+            const weekAgoStr = `${weekAgo.getFullYear()}-${String(weekAgo.getMonth() + 1).padStart(2, '0')}-${String(weekAgo.getDate()).padStart(2, '0')}`;
+            
+            appointmentsResponse = await appointmentService.getAppointments({
+              patientId: patientId,
+              dateFrom: weekAgoStr,
+              dateTo: todayStr
+            });
+            
+            appointments = appointmentsResponse.appointments || appointmentsResponse.data?.appointments || [];
+            console.log('📅 Citas encontradas en últimos 7 días:', appointments.length);
+            console.log('📅 Detalles de citas de últimos 7 días:', appointments.map(apt => ({
+              id: apt.id,
+              date: apt.appointment_date || apt.appointmentDate,
+              time: apt.appointment_time || apt.appointmentTime,
+              modality: apt.modality,
+              type: apt.type
+            })));
+          }
+          
+          // Obtener la cita más reciente
+          if (appointments.length > 0) {
+            // Ordenar por fecha y hora, más reciente primero
+            const sortedAppointments = appointments.sort((a, b) => {
+              const dateA = a.appointment_date || a.appointmentDate || '';
+              const dateB = b.appointment_date || b.appointmentDate || '';
+              const timeA = a.appointment_time || a.appointmentTime || '';
+              const timeB = b.appointment_time || b.appointmentTime || '';
+              
+              const dateTimeA = `${dateA}T${timeA}`;
+              const dateTimeB = `${dateB}T${timeB}`;
+              
+              return dateTimeB.localeCompare(dateTimeA); // Más reciente primero
+            });
+            
+            console.log('📅 Citas ordenadas (más reciente primero):', sortedAppointments.map(apt => ({
+              id: apt.id,
+              date: apt.appointment_date || apt.appointmentDate,
+              time: apt.appointment_time || apt.appointmentTime,
+              modality: apt.modality,
+              type: apt.type
+            })));
+            
+            const latestAppointment = sortedAppointments[0];
+            console.log('✅ Cita seleccionada (la más reciente):', {
+              id: latestAppointment.id,
+              date: latestAppointment.appointment_date || latestAppointment.appointmentDate,
+              time: latestAppointment.appointment_time || latestAppointment.appointmentTime,
+              modality: latestAppointment.modality,
+              type: latestAppointment.type
+            });
+            setCurrentAppointment(latestAppointment);
+            
+            // Verificar si es telemedicina
+            // Puede estar en el campo modality (principal), type, o en notes
+            const rawModality = latestAppointment.modality || '';
+            const rawType = latestAppointment.type || '';
+            const rawNotes = latestAppointment.notes || '';
+            
+            const type = String(rawType).toLowerCase().trim();
+            const modality = String(rawModality).toLowerCase().trim();
+            const notes = String(rawNotes).toLowerCase().trim();
+            
+            console.log('🔍 Valores raw de la cita:', {
+              rawModality,
+              rawType,
+              rawNotes,
+              modalityLower: modality,
+              typeLower: type
+            });
+            
+            // Detectar telemedicina: el campo modality es el principal
+            const isTelemed = modality === 'telemedicina' ||
+                             type.includes('telemedicina') || 
+                             notes.includes('telemedicina');
+            
+            console.log('🔍 Resultado de detección:', {
+              'modality === "telemedicina"': modality === 'telemedicina',
+              'type.includes("telemedicina")': type.includes('telemedicina'),
+              'notes.includes("telemedicina")': notes.includes('telemedicina'),
+              isTelemed
+            });
+            
+            setIsTelemedicine(isTelemed);
+            console.log('📋 Cita actual detectada:', {
+              id: latestAppointment.id,
+              type: latestAppointment.type,
+              modality: latestAppointment.modality,
+              modalityLower: modality,
+              notes: latestAppointment.notes,
+              isTelemedicina: isTelemed
+            });
+            console.log('📹 Estado isTelemedicine actualizado a:', isTelemed);
+          } else {
+            console.log('⚠️ No se encontraron citas para este paciente');
+            setIsTelemedicine(false);
+            setCurrentAppointment(null);
+          }
+        } catch (appointmentError) {
+          console.warn('No se pudo cargar la cita actual:', appointmentError);
+          setIsTelemedicine(false);
+          setCurrentAppointment(null);
+          // No es crítico, continuar sin cita
+        }
       } catch (error) {
         console.error('Error cargando datos del paciente:', error);
         toast.error('Error al cargar los datos del paciente');
@@ -519,6 +717,23 @@ const MedicalConsultation = () => {
     }
   };
 
+  // Función para procesar transcripción de prueba manualmente
+  const processTestTranscript = async () => {
+    if (!testTranscript.trim()) {
+      toast.error('Ingresa una transcripción de prueba');
+      return;
+    }
+    
+    setRecordingState('processing');
+    setIsProcessing(true);
+    
+    // Simular el envío usando la transcripción de prueba
+    transcriptRef.current.final = testTranscript.trim();
+    transcriptRef.current.interim = '';
+    
+    await sendAudioToAI(null);
+  };
+
   const sendAudioToAI = async (audioBlob) => {
     try {
       // Usar el ref que tiene la transcripción acumulada
@@ -537,6 +752,60 @@ const MedicalConsultation = () => {
         setIsProcessing(false);
         return;
       }
+
+      // Cargar códigos CIE-10 si no están cargados
+      let cie10List = [];
+      if (cie10Options.length === 0 || (cie10Options.length === 1 && cie10Options[0].value === '')) {
+        try {
+          const candidateUrls = [
+            '/cie10.csv',
+            '/assets/cie10.csv',
+            '/public/cie10.csv',
+            '/frontend/utils/cie10.csv',
+            '/utils/cie10.csv'
+          ];
+          
+          for (const url of candidateUrls) {
+            try {
+              const resp = await fetch(url, { cache: 'no-store' });
+              if (resp.ok) {
+                const text = await resp.text();
+                const lines = String(text || '').split(/\r?\n/);
+                for (const line of lines) {
+                  if (!line) continue;
+                  const parts = line.split(';');
+                  const code = String(parts[0] || '').trim();
+                  const desc = String(parts[1] || '').trim();
+                  if (code && desc) {
+                    cie10List.push({ code, description: desc });
+                  }
+                }
+                break;
+              }
+            } catch (_) {
+              continue;
+            }
+          }
+        } catch (e) {
+          console.warn('No se pudo cargar CIE-10 para enviar a la IA:', e);
+        }
+      } else {
+        // Usar los códigos ya cargados
+        cie10List = cie10Options
+          .filter(opt => opt.value && opt.value !== '')
+          .map(opt => {
+            // Extraer código y descripción del label "CODE - DESCRIPTION"
+            const match = opt.label.match(/^([A-Z0-9.]+)\s*-\s*(.+)$/);
+            if (match) {
+              return { code: match[1], description: match[2] };
+            }
+            return { code: opt.value, description: opt.label };
+          });
+      }
+
+      // Limitar códigos CIE-10 para no exceder el payload (máximo 500)
+      const limitedCie10List = cie10List.slice(0, 500);
+      console.log(`📋 Enviando ${limitedCie10List.length} códigos CIE-10 a la IA (de ${cie10List.length} disponibles)`);
 
       // Preparar resumen del paciente para la IA
       const patientSummary = patient ? {
@@ -557,25 +826,237 @@ const MedicalConsultation = () => {
           templateId: selectedTemplateId,
           language: 'es',
           templateDef: selectedTemplateData,
-          patientSummary
+          patientSummary,
+          cie10Codes: limitedCie10List // Enviar listado limitado de códigos CIE-10
         },
-        { timeout: 60000 }
+        { timeout: 120000 } // Aumentar timeout a 2 minutos
       );
 
       // Cargar sugerencias (NO autocompletar campos automáticamente)
       if (data.suggestions) setAiSuggestions(data.suggestions);
 
-      // Cargar RIPS
+      // Cargar RIPS y mapear valores correctamente
+      console.log('🔍 Verificando datos RIPS en respuesta:', {
+        hasRips: !!data.rips,
+        ripsData: data.rips,
+        fullResponse: data
+      });
+      
       if (data.rips) {
-        setRipsData(prev => ({ ...prev, ...data.rips }));
+        // Usar ref para obtener las opciones CIE-10 actualizadas (evita closure stale)
+        const currentCie10Options = cie10OptionsRef.current;
+        
+        console.log('📋 Datos RIPS recibidos de la IA:', JSON.stringify(data.rips, null, 2));
+        console.log('📊 Estado actual de ripsData antes de mapear:', ripsData);
+        console.log('📋 CIE-10 options disponibles (desde ref):', currentCie10Options.length);
+        
+        // Verificar que los códigos CIE-10 estén cargados
+        if (currentCie10Options.length === 0 || (currentCie10Options.length === 1 && currentCie10Options[0].value === '')) {
+          console.warn('⚠️ CIE-10 no están cargados aún. Cargando...');
+          // Intentar cargar CIE-10 si no están cargados
+          try {
+            const candidateUrls = [
+              '/cie10.csv',
+              '/assets/cie10.csv',
+              '/public/cie10.csv',
+              '/frontend/utils/cie10.csv',
+              '/utils/cie10.csv'
+            ];
+            
+            for (const url of candidateUrls) {
+              try {
+                const resp = await fetch(url, { cache: 'no-store' });
+                if (resp.ok) {
+                  const text = await resp.text();
+                  const lines = String(text || '').split(/\r?\n/);
+                  const opts = [];
+                  for (const line of lines) {
+                    if (!line) continue;
+                    const parts = line.split(';');
+                    const code = String(parts[0] || '').trim();
+                    const desc = String(parts[1] || '').trim();
+                    if (code && desc) {
+                      opts.push({ value: code, label: `${code} - ${desc}` });
+                    }
+                  }
+                  if (opts.length > 0) {
+                    const loadedOptions = [{ value: '', label: 'Seleccione una opción' }, ...opts];
+                    setCie10Options(loadedOptions);
+                    cie10OptionsRef.current = loadedOptions; // Actualizar ref inmediatamente
+                    console.log(`✅ CIE-10 cargados: ${opts.length} códigos`);
+                    break;
+                  }
+                }
+              } catch (_) {
+                continue;
+              }
+            }
+          } catch (e) {
+            console.error('Error cargando CIE-10:', e);
+          }
+        }
+        
+        // Función para mapear valores de texto a valores de selector
+        const mapRipsValue = (value, options) => {
+          if (!value || value === '' || value === '-') return '';
+          
+          // Si el valor ya es un valor válido del selector, usarlo directamente
+          const exactMatch = options.find(opt => opt.value === value);
+          if (exactMatch) return value;
+          
+          // Buscar coincidencia case-insensitive
+          const caseInsensitiveMatch = options.find(opt => 
+            opt.value.toLowerCase() === value.toLowerCase() ||
+            opt.label.toLowerCase() === value.toLowerCase()
+          );
+          if (caseInsensitiveMatch) return caseInsensitiveMatch.value;
+          
+          // Buscar coincidencia parcial en el label
+          const partialMatch = options.find(opt => 
+            opt.label.toLowerCase().includes(value.toLowerCase()) ||
+            value.toLowerCase().includes(opt.label.toLowerCase())
+          );
+          if (partialMatch) return partialMatch.value;
+          
+          console.warn('⚠️ Valor RIPS no encontrado en opciones:', value);
+          return '';
+        };
+        
+        // Función para mapear códigos CIE-10
+        const mapCie10Code = (code) => {
+          if (!code || code === '' || code === '-') return '';
+          
+          // Normalizar el código recibido (eliminar espacios, convertir a mayúsculas)
+          const normalizedInput = code.trim().toUpperCase().replace(/\s+/g, '');
+          
+          // Función auxiliar para normalizar códigos CIE-10
+          // Los códigos CIE-10 tienen formato: Letra + 2 dígitos + . + 1-2 dígitos (ej: L63.9, L21.9)
+          const normalizeCie10Code = (cieCode) => {
+            // Eliminar espacios y convertir a mayúsculas
+            let normalized = cieCode.trim().toUpperCase().replace(/\s+/g, '');
+            
+            // Si tiene formato LXXX (sin punto), intentar agregar el punto
+            // Ejemplo: L639 -> L63.9, L219 -> L21.9
+            const match = normalized.match(/^([A-Z])(\d{2})(\d{1,2})$/);
+            if (match) {
+              const [, letter, twoDigits, lastDigits] = match;
+              normalized = `${letter}${twoDigits}.${lastDigits}`;
+            }
+            
+            return normalized;
+          };
+          
+          const normalizedCode = normalizeCie10Code(normalizedInput);
+          
+          // Usar las opciones CIE-10 actualizadas desde ref
+          const optionsToSearch = cie10OptionsRef.current;
+          
+          // 1. Buscar coincidencia exacta
+          const exactMatch = optionsToSearch.find(opt => {
+            const optValue = opt.value.trim().toUpperCase();
+            return optValue === normalizedCode || optValue === normalizedInput;
+          });
+          if (exactMatch) {
+            console.log(`✅ Código encontrado (exacto): ${code} -> ${exactMatch.value}`);
+            return exactMatch.value;
+          }
+          
+          // 2. Buscar coincidencia normalizada (con/sin punto)
+          const normalizedMatch = optionsToSearch.find(opt => {
+            const optCode = normalizeCie10Code(opt.value);
+            return optCode === normalizedCode || 
+                   optCode.replace(/\./g, '') === normalizedCode.replace(/\./g, '') ||
+                   optCode.replace(/\./g, '') === normalizedInput.replace(/\./g, '');
+          });
+          if (normalizedMatch) {
+            console.log(`✅ Código encontrado (normalizado): ${code} -> ${normalizedMatch.value}`);
+            return normalizedMatch.value;
+          }
+          
+          // 3. Buscar coincidencia parcial (buscar el código base)
+          const baseCode = normalizedCode.split('.')[0]; // Ej: L63.9 -> L63
+          const partialMatch = optionsToSearch.find(opt => {
+            const optCode = normalizeCie10Code(opt.value);
+            const optBase = optCode.split('.')[0];
+            return optBase === baseCode || optCode.includes(normalizedCode) || normalizedCode.includes(optCode);
+          });
+          if (partialMatch) {
+            console.log(`✅ Código encontrado (parcial): ${code} -> ${partialMatch.value}`);
+            return partialMatch.value;
+          }
+          
+          // 4. Buscar por descripción si el código viene con descripción (ej: "L639 - ALOPECIA AREATA")
+          const codeWithDesc = normalizedInput.match(/^([A-Z]\d+\.?\d*)/);
+          if (codeWithDesc) {
+            const extractedCode = normalizeCie10Code(codeWithDesc[1]);
+            const descMatch = optionsToSearch.find(opt => {
+              const optCode = normalizeCie10Code(opt.value);
+              return optCode === extractedCode || 
+                     optCode.replace(/\./g, '') === extractedCode.replace(/\./g, '');
+            });
+            if (descMatch) {
+              console.log(`✅ Código encontrado (extraído de descripción): ${code} -> ${descMatch.value}`);
+              return descMatch.value;
+            }
+          }
+          
+          console.warn('⚠️ Código CIE-10 no encontrado:', code, '(normalizado:', normalizedCode + ')');
+          return '';
+        };
+        
+        // Mapear cada campo RIPS
+        const mappedRips = {
+          diagnosticoPrincipal: mapCie10Code(data.rips.diagnosticoPrincipal),
+          tipoDiagnostico: mapRipsValue(data.rips.tipoDiagnostico, tipoDiagnosticoOptions),
+          finalidadProcedimiento: mapRipsValue(data.rips.finalidadProcedimiento, finalidadProcedimientoOptions),
+          finalidadConsulta: mapRipsValue(data.rips.finalidadConsulta, finalidadConsultaOptions),
+          causaExterna: mapRipsValue(data.rips.causaExterna, [{ value: '', label: '' }, ...causaExternaFlatOptions]),
+          diagnosticoComplicacion: mapCie10Code(data.rips.diagnosticoComplicacion),
+          modalidadAtencion: mapRipsValue(data.rips.modalidadAtencion, modalidadAtencionOptions),
+          ambitoAtencion: mapRipsValue(data.rips.ambitoAtencion, ambitoAtencionOptions),
+          tipoServicio: mapRipsValue(data.rips.tipoServicio, tipoServicioOptions),
+          diagnosticoSecundario1: mapCie10Code(data.rips.diagnosticoSecundario1),
+          diagnosticoSecundario2: mapCie10Code(data.rips.diagnosticoSecundario2),
+          diagnosticoSecundario3: mapCie10Code(data.rips.diagnosticoSecundario3)
+        };
+        
+        console.log('✅ Datos RIPS mapeados:', JSON.stringify(mappedRips, null, 2));
+        console.log('📊 Valores mapeados individuales:', {
+          diagnosticoPrincipal: mappedRips.diagnosticoPrincipal,
+          tipoDiagnostico: mappedRips.tipoDiagnostico,
+          finalidadConsulta: mappedRips.finalidadConsulta,
+          causaExterna: mappedRips.causaExterna
+        });
+        
+        // Aplicar los datos mapeados al estado
+        setRipsData(prev => {
+          const updated = { ...prev, ...mappedRips };
+          console.log('🔄 Actualizando ripsData:', {
+            anterior: prev,
+            nuevo: updated,
+            cambios: mappedRips
+          });
+          return updated;
+        });
+        
         // Manejar diagnósticos secundarios como array
         const sec = [
-          data.rips.diagnosticoSecundario1 || '',
-          data.rips.diagnosticoSecundario2 || '',
-          data.rips.diagnosticoSecundario3 || ''
+          mappedRips.diagnosticoSecundario1 || '',
+          mappedRips.diagnosticoSecundario2 || '',
+          mappedRips.diagnosticoSecundario3 || ''
         ].filter(Boolean);
         const uniq = Array.from(new Set(sec));
+        console.log('📋 Diagnósticos secundarios procesados:', { sec, uniq });
         setSecondaryCodes(uniq);
+        
+        // Verificar que los datos se aplicaron correctamente después de un pequeño delay
+        setTimeout(() => {
+          console.log('✅ Verificación final - ripsData después de actualizar:', ripsData);
+        }, 100);
+        
+        toast.success('Datos RIPS cargados automáticamente');
+      } else {
+        console.warn('⚠️ No se recibieron datos RIPS en la respuesta:', data);
       }
 
       setRecordingState('suggestions');
@@ -789,6 +1270,24 @@ const MedicalConsultation = () => {
     }));
   };
 
+  // Componente para mostrar sugerencia de IA debajo de un campo
+  const renderAISuggestion = (fieldId) => {
+    const suggestion = aiSuggestions[fieldId];
+    if (!suggestion) return null;
+
+    return (
+      <div className="mt-2 bg-blue-50 border border-blue-100 rounded-lg p-3 flex items-start justify-between gap-3">
+        <p className="text-sm text-gray-700 flex-1">{suggestion}</p>
+        <button
+          onClick={() => addSuggestion(fieldId, suggestion)}
+          className="px-3 py-1.5 text-sm font-medium text-blue-600 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors whitespace-nowrap"
+        >
+          + Añadir
+        </button>
+      </div>
+    );
+  };
+
   const renderTemplateField = (field) => {
     const value = templateFormData[field.id] || '';
 
@@ -807,6 +1306,7 @@ const MedicalConsultation = () => {
               required={field.required}
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-300"
             />
+            {renderAISuggestion(field.id)}
           </div>
         );
 
@@ -824,6 +1324,7 @@ const MedicalConsultation = () => {
               rows={3}
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none transition-all duration-300"
             />
+            {renderAISuggestion(field.id)}
           </div>
         );
 
@@ -847,6 +1348,7 @@ const MedicalConsultation = () => {
                 </option>
               ))}
             </select>
+            {renderAISuggestion(field.id)}
           </div>
         );
 
@@ -858,17 +1360,18 @@ const MedicalConsultation = () => {
   // Validaciones para cada pestaña
   const validateTab = (tabId) => {
     switch (tabId) {
-      case 'tipo-consulta':
-        return !!selectedTemplateId;
       case 'consulta':
-        // Validar que todos los campos requeridos de la plantilla estén llenos
+        // Si no hay plantilla seleccionada, no se puede continuar
+        if (!selectedTemplateId) {
+          return false;
+        }
+        // Si hay plantilla pero no hay campos, permitir continuar
         if (!selectedTemplateData?.fields || selectedTemplateData.fields.length === 0) {
-          // Si no hay campos, permitir continuar
           return true;
         }
+        // Validar que todos los campos requeridos de la plantilla estén llenos
         const requiredFields = selectedTemplateData.fields.filter(f => f.required);
         if (requiredFields.length === 0) {
-          // Si no hay campos requeridos, permitir continuar
           return true;
         }
         return requiredFields.every(field => {
@@ -901,7 +1404,7 @@ const MedicalConsultation = () => {
       return;
     }
 
-    const tabOrder = ['tipo-consulta', 'consulta', 'diagnostico', 'finalizar'];
+    const tabOrder = ['consulta', 'diagnostico', 'finalizar'];
     const currentIndex = tabOrder.indexOf(activeTab);
     
     if (currentIndex < tabOrder.length - 1) {
@@ -929,113 +1432,504 @@ const MedicalConsultation = () => {
       plantilla: selectedTemplateId,
       plantillaData: selectedTemplateData,
       datosPlantilla: templateFormData,
-      rips: ripsData,
-      medicamentos: medications
+      rips: ripsData
     });
     
     toast.success('Consulta finalizada exitosamente');
   };
 
-  const renderTabContent = () => {
-    switch (activeTab) {
-      case 'tipo-consulta':
-        return (
-          <div className="flex flex-col items-center justify-center py-12 px-8">
-            <h2 className="text-2xl font-semibold text-gray-800 mb-8">
-              Selecciona una plantilla
-            </h2>
-            
-            <div className="w-24 h-24 bg-blue-100 rounded-full flex items-center justify-center mb-8">
-              <div className="w-16 h-16 bg-blue-500 rounded-lg flex items-center justify-center">
-                <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+  // Funciones para VideoSDK
+  const generateToken = async () => {
+    try {
+      // Generar token desde el backend (más seguro)
+      console.log('🔑 Solicitando token de VideoSDK desde:', api.defaults.baseURL + '/videosdk/token');
+      const response = await api.post('/videosdk/token');
+      
+      if (response.data && response.data.token) {
+        setToken(response.data.token);
+        console.log('✅ Token de VideoSDK generado desde el backend');
+        return response.data.token;
+      } else {
+        throw new Error('No se recibió un token válido del servidor');
+      }
+    } catch (error) {
+      console.error('Error generando token desde backend:', error);
+      
+      // Fallback: intentar con token predefinido si existe (solo para desarrollo)
+      if (VIDEO_SDK_TOKEN && VIDEO_SDK_TOKEN !== 'YOUR_TOKEN_HERE') {
+        if (!isTokenExpired(VIDEO_SDK_TOKEN)) {
+          console.warn('⚠️ Usando token predefinido como fallback');
+          setToken(VIDEO_SDK_TOKEN);
+          return VIDEO_SDK_TOKEN;
+        } else {
+          console.warn('⚠️ El token predefinido ha expirado');
+        }
+      }
+      
+      toast.error('Error al inicializar la videollamada. Por favor, intenta de nuevo.');
+      return null;
+    }
+  };
+
+  const createMeeting = async () => {
+    try {
+      const authToken = token || await generateToken();
+      if (!authToken) {
+        toast.error('No se pudo obtener el token de autenticación');
+        return;
+      }
+
+      console.log('🔑 Token obtenido:', authToken.substring(0, 50) + '...');
+      
+      // Crear sala desde el backend (más seguro)
+      try {
+        const response = await api.post('/videosdk/rooms', { token: authToken });
+        
+        if (response.data && response.data.roomId) {
+          setMeetingId(response.data.roomId);
+          // Actualizar el token si el backend devuelve uno nuevo
+          if (response.data.token) {
+            setToken(response.data.token);
+          }
+          console.log('✅ Sala creada desde backend:', response.data.roomId);
+          toast.success('Sala de videollamada creada exitosamente');
+          return response.data.roomId;
+        } else {
+          throw new Error('No se recibió roomId en la respuesta del servidor');
+        }
+      } catch (apiError) {
+        // Fallback: intentar crear sala directamente desde el frontend
+        console.warn('⚠️ Error creando sala desde backend, intentando directamente:', apiError);
+        
+        const response = await fetch('https://api.videosdk.live/v2/rooms', {
+          method: 'POST',
+          headers: {
+            'authorization': authToken, // VideoSDK espera 'authorization' en minúscula, sin 'Bearer'
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({}), // Body vacío según el ejemplo funcional
+        });
+
+        console.log('📡 Respuesta del servidor:', response.status, response.statusText);
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ message: 'Error desconocido' }));
+          console.error('❌ Error del servidor:', errorData);
+          
+          if (response.status === 401) {
+            toast.error('Token de autenticación inválido o expirado. Por favor, actualiza el token.');
+          } else {
+            toast.error(`Error al crear la sala: ${errorData.message || response.statusText}`);
+          }
+          return null;
+        }
+
+        const data = await response.json();
+        console.log('✅ Sala creada:', data);
+        
+        if (data.roomId) {
+          setMeetingId(data.roomId);
+          toast.success('Sala de videollamada creada exitosamente');
+          return data.roomId;
+        } else {
+          throw new Error('No se recibió roomId en la respuesta');
+        }
+      }
+    } catch (error) {
+      console.error('Error creando meeting:', error);
+      toast.error('Error al crear la sala de videollamada: ' + error.message);
+      return null;
+    }
+  };
+
+  // Inicializar meeting cuando es telemedicina
+  useEffect(() => {
+    if (isTelemedicine && !meetingId) {
+      // Primero obtener el token, luego crear el meeting
+      const initializeMeeting = async () => {
+        const authToken = token || await generateToken();
+        if (authToken && !meetingId) {
+          await createMeeting();
+        }
+      };
+      
+      initializeMeeting();
+    }
+  }, [isTelemedicine]);
+
+  // Componente interno para el video del participante
+  const ParticipantVideo = ({ participantId }) => {
+    const { webcamStream, webcamOn, displayName, micOn } = useParticipant(participantId);
+    const webcamRef = useRef(null);
+
+    useEffect(() => {
+      if (webcamStream && webcamRef.current) {
+        const mediaStream = new MediaStream();
+        webcamStream.track && mediaStream.addTrack(webcamStream.track);
+        webcamRef.current.srcObject = mediaStream;
+      }
+    }, [webcamStream]);
+
+    if (!webcamOn) {
+      return (
+        <div className="w-full h-full bg-[#292929] flex items-center justify-center">
+          <div className="text-center text-gray-400">
+            <svg className="w-16 h-16 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                 </svg>
+            <p className="text-sm">{displayName || 'Participante'}</p>
+            {!micOn && <p className="text-xs mt-2">Micrófono silenciado</p>}
               </div>
             </div>
-            
-            <p className="text-gray-600 text-center max-w-md mb-8 leading-relaxed">
-              Esta elección personaliza las preguntas de la entrevista médica y organiza los campos que verás a continuación, para que el registro sea más rápido, claro y enfocado en el paciente.
-            </p>
-            
-            <div className="w-full max-w-md mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Plantilla de la consulta
-              </label>
-              <div className="relative">
-                <select 
-                  value={selectedTemplateId}
-                  onChange={(e) => setSelectedTemplateId(e.target.value)}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white"
-                >
-                  <option value="">Selecciona una plantilla</option>
-                  {templates.map((template) => (
-                    <option key={template.id} value={template.id}>
-                      {template.name}
-                    </option>
-                  ))}
-                </select>
-                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
-                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+      );
+    }
+
+    return (
+      <video
+        ref={webcamRef}
+        autoPlay
+        playsInline
+        muted={false}
+        className="w-full h-full object-cover"
+      />
+    );
+  };
+
+  // Componente interno para los controles de la reunión
+  const MeetingControls = () => {
+    const { join, leave, toggleMic, toggleWebcam, micOn, webcamOn } = useMeeting();
+    
+    // Estados locales para rastrear los valores reales de VideoSDK
+    const [micState, setMicState] = useState(true); // Por defecto activo según config
+    const [webcamState, setWebcamState] = useState(true); // Por defecto activo según config
+
+    // Unirse automáticamente cuando el componente se monta
+    useEffect(() => {
+      if (!isMeetingJoined) {
+        console.log('🎥 Uniéndose automáticamente a la videollamada...');
+        join();
+        setIsMeetingJoined(true);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // Solo ejecutar una vez al montar
+
+    // Actualizar estados locales cuando VideoSDK cambie los valores
+    useEffect(() => {
+      if (micOn !== undefined) {
+        console.log('🎤 Estado del micrófono actualizado:', micOn ? 'ACTIVO' : 'INACTIVO');
+        setMicState(micOn);
+      }
+    }, [micOn]);
+
+    useEffect(() => {
+      if (webcamOn !== undefined) {
+        console.log('📹 Estado de la cámara actualizado:', webcamOn ? 'ACTIVA' : 'INACTIVA');
+        setWebcamState(webcamOn);
+      }
+    }, [webcamOn]);
+
+    const handleJoin = () => {
+      join();
+      setIsMeetingJoined(true);
+      toast.success('Te has unido a la videollamada');
+    };
+
+    const handleLeave = () => {
+      leave();
+      setIsMeetingJoined(false);
+      toast.info('Has salido de la videollamada');
+    };
+
+    // Handlers para prevenir que el evento se pase a VideoSDK (evita error de estructura circular)
+    const handleToggleMic = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        // Capturar el estado actual antes de hacer el toggle
+        const currentState = micState;
+        const newState = !currentState;
+        console.log('🔄 Cambiando micrófono de', currentState ? 'ACTIVO' : 'INACTIVO', 'a', newState ? 'ACTIVO' : 'INACTIVO');
+        
+        // Actualizar estado local inmediatamente para feedback visual instantáneo
+        setMicState(newState);
+        
+        // Llamar a la función de VideoSDK
+        toggleMic();
+        
+        // Feedback visual con toast
+        if (newState) {
+          toast.success('Micrófono activado', { duration: 1500 });
+        } else {
+          toast.error('Micrófono silenciado', { duration: 1500 });
+        }
+      } catch (error) {
+        console.error('Error al cambiar estado del micrófono:', error);
+        // Revertir el estado si hay error
+        setMicState(!micState);
+        toast.error('Error al cambiar el estado del micrófono');
+      }
+    };
+
+    const handleToggleWebcam = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        // Capturar el estado actual antes de hacer el toggle
+        const currentState = webcamState;
+        const newState = !currentState;
+        console.log('🔄 Cambiando cámara de', currentState ? 'ACTIVA' : 'INACTIVA', 'a', newState ? 'ACTIVA' : 'INACTIVA');
+        
+        // Actualizar estado local inmediatamente para feedback visual instantáneo
+        setWebcamState(newState);
+        
+        // Llamar a la función de VideoSDK
+        toggleWebcam();
+        
+        // Feedback visual con toast
+        if (newState) {
+          toast.success('Cámara activada', { duration: 1500 });
+        } else {
+          toast.error('Cámara desactivada', { duration: 1500 });
+        }
+      } catch (error) {
+        console.error('Error al cambiar estado de la cámara:', error);
+        // Revertir el estado si hay error
+        setWebcamState(!webcamState);
+        toast.error('Error al cambiar el estado de la cámara');
+      }
+    };
+
+    if (!isMeetingJoined) {
+      return (
+        <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 px-4 py-3 flex items-center justify-center z-10">
+          <button
+            onClick={handleJoin}
+            className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2"
+          >
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
                   </svg>
+            <span>Unirse a la llamada</span>
+          </button>
                 </div>
-              </div>
-              <p className="text-xs text-gray-500 mt-2">
-                Si la plantilla no se ajusta al motivo de consulta contacta a tu administrador
-              </p>
-            </div>
-            
-            <button 
-              onClick={handleContinue}
-              disabled={!validateTab('tipo-consulta')}
-              className={`w-full max-w-md py-3 px-6 rounded-lg flex items-center justify-center gap-2 transition-colors ${
-                validateTab('tipo-consulta')
-                  ? 'bg-blue-600 hover:bg-blue-700 text-white' 
-                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-              }`}
-            >
-              <span>Continuar</span>
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+      );
+    }
+
+    return (
+      <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 px-4 py-3 flex items-center justify-center gap-3 z-10">
+        {/* Botón de Micrófono */}
+        <button 
+          onClick={handleToggleMic}
+          className={`w-10 h-10 rounded-full flex items-center justify-center text-white transition-all duration-200 ${
+            micState 
+              ? 'bg-[#292929]/60 hover:bg-[#292929]/80' // Activo: fondo gris con 60% opacidad
+              : 'bg-red-600 hover:bg-red-700'     // Inactivo: fondo rojo
+          }`}
+          title={micState ? 'Silenciar micrófono' : 'Activar micrófono'}
+          aria-label={micState ? 'Micrófono activo' : 'Micrófono inactivo'}
+        >
+          {micState ? (
+            <MicIconActive width={20} height={20} stroke="white" strokeWidth={2} />
+          ) : (
+            <MicIconInactive width={20} height={20} stroke="white" strokeWidth={1.5} />
+          )}
+        </button>
+        
+        {/* Botón de Cámara */}
+        <button
+          onClick={handleToggleWebcam}
+          className={`w-10 h-10 rounded-full flex items-center justify-center text-white transition-all duration-200 ${
+            webcamState 
+              ? 'bg-[#292929]/60 hover:bg-[#292929]/80' // Activo: fondo gris con 60% opacidad
+              : 'bg-red-600 hover:bg-red-700'     // Inactivo: fondo rojo
+          }`}
+          title={webcamState ? 'Apagar cámara' : 'Encender cámara'}
+          aria-label={webcamState ? 'Cámara activa' : 'Cámara inactiva'}
+        >
+          {webcamState ? (
+            <CameraIconActive width={20} height={20} stroke="white" strokeWidth={1.5} />
+          ) : (
+            <CameraIconInactive width={20} height={20} stroke="white" strokeWidth={1.5} />
+          )}
+        </button>
+        <button
+          className="w-10 h-10 rounded-full bg-[#292929]/60 hover:bg-[#292929]/80 flex items-center justify-center text-white transition-all duration-200"
+          title="Compartir pantalla"
+        >
+          <ShareScreenIcon width={20} height={20} stroke="white" strokeWidth={1.5} />
+        </button>
+        <button
+          onClick={() => setIsChatOpen(!isChatOpen)}
+          className="w-10 h-10 rounded-full bg-[#292929]/60 hover:bg-[#292929]/80 flex items-center justify-center text-white transition-all duration-200"
+          title="Chat"
+        >
+          <ChatIcon width={20} height={20} stroke="white" strokeWidth={1.5} />
+        </button>
+        <button
+          onClick={handleLeave}
+          className="w-10 h-10 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center text-white"
+          title="Finalizar llamada"
+        >
+          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
+          </svg>
+        </button>
+        <button
+          className="w-10 h-10 rounded-full bg-[#292929]/60 hover:bg-[#292929]/80 flex items-center justify-center text-white transition-all duration-200"
+          title="Más opciones"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
               </svg>
             </button>
           </div>
         );
-      
-      case 'consulta':
+  };
+
+  // Componente interno para la vista de la reunión
+  const MeetingView = () => {
+    const { participants, localParticipant } = useMeeting();
+    const participantsArray = Array.from(participants.values());
+    
+    // Video principal (primer participante remoto o local)
+    const mainParticipant = participantsArray[0] || localParticipant;
+    // Video pequeño (local si hay remotos, o null)
+    const smallParticipant = participantsArray.length > 0 ? localParticipant : null;
+
         return (
-          <div className="p-8">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              {/* Panel izquierdo - Asistente AI */}
-              <div className="space-y-6">
-                <div>
-                  <h2 className="text-2xl font-semibold text-gray-800 mb-2">Asistente AI</h2>
-                  <p className="text-gray-600 text-sm">
+      <div className="flex-1 relative bg-[#5D5D5D] min-h-[400px]">
+        {/* Video principal */}
+        {mainParticipant && (
+          <div className="absolute inset-0">
+            <ParticipantVideo participantId={mainParticipant.id} />
+          </div>
+        )}
+        
+        {/* Video pequeño del doctor (esquina superior derecha) */}
+        {smallParticipant && (
+          <div className="absolute top-4 right-4 w-48 h-36 bg-gray-600 rounded-lg overflow-hidden border-2 border-white shadow-lg">
+            <ParticipantVideo participantId={smallParticipant.id} />
+          </div>
+        )}
+
+        {/* Placeholder si no hay participantes */}
+        {!mainParticipant && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="text-center text-gray-400">
+              <svg className="w-16 h-16 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
+              <p className="text-sm">Esperando participantes...</p>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Componente para el panel de video (siempre visible en telemedicina)
+  const renderVideoPanel = () => {
+    if (!meetingId || !token) {
+      return (
+        <div className="w-1/2 flex flex-col bg-gray-900 rounded-lg overflow-hidden">
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center text-gray-400">
+              <div className="relative w-16 h-16 mx-auto mb-4">
+                <div className="absolute inset-0 border-4 border-blue-200 rounded-full"></div>
+                <div className="absolute inset-0 border-4 border-blue-600 rounded-full border-t-transparent animate-spin"></div>
+              </div>
+              <p className="text-sm">Inicializando videollamada...</p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Obtener nombre del usuario actual
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    const userName = user.name || user.firstName || 'Doctor';
+
+    return (
+      <MeetingProvider
+        config={{
+          meetingId: meetingId,
+          micEnabled: true,
+          webcamEnabled: true,
+          name: userName,
+        }}
+        token={token}
+      >
+        <div className="w-full flex flex-col bg-gray-900 rounded-lg overflow-hidden relative">
+          <MeetingView />
+          <MeetingControls />
+        </div>
+      </MeetingProvider>
+    );
+  };
+
+  // Componente para el asistente AI (disponible en consulta y telemedicina)
+  const renderAIAssistant = () => {
+    if (activeTab !== 'consulta') {
+      return null;
+    }
+
+    return (
+      <div className="w-full bg-white rounded-b-lg shadow-sm border border-gray-200 border-t-0 p-4">
+          <div className="mb-3">
+            <h3 className="text-lg font-semibold text-gray-800 mb-1">Asistente AI</h3>
+            <p className="text-sm text-gray-600">
                     Completa automáticamente la entrevista médica mientras hablas con el paciente. Solo activa el micrófono y continúa tu consulta con normalidad.
                   </p>
                 </div>
 
-                <div className="bg-gray-50 rounded-lg p-6">
+          <div className="bg-gray-50 rounded-lg p-4">
                   {recordingState === 'idle' && (
-                  <button
-                      onClick={startRecording}
-                      className="w-full py-4 px-6 rounded-lg font-medium bg-gray-800 hover:bg-gray-900 text-white transition-colors flex items-center justify-center gap-2"
-                    >
-                      <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
-                        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-                      </svg>
-                      <span>Grabar</span>
-                  </button>
+                  <div className="space-y-4">
+                    <button
+                        onClick={startRecording}
+                  className="w-full py-3 px-4 rounded-lg font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors flex items-center justify-center gap-2"
+                      >
+                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                        </svg>
+                  <span>Activar asistente</span>
+                    </button>
+                    
+                    {/* Campo para transcripción de prueba */}
+                    <div className="border-t border-gray-200 pt-4">
+                      <p className="text-xs text-gray-500 mb-2">O pega una transcripción de prueba:</p>
+                      <textarea
+                        value={testTranscript}
+                        onChange={(e) => setTestTranscript(e.target.value)}
+                        placeholder="Pega aquí la transcripción de la consulta..."
+                        rows={4}
+                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                      />
+                      <button
+                        onClick={processTestTranscript}
+                        disabled={!testTranscript.trim() || !selectedTemplateId}
+                        className={`w-full mt-2 py-2 px-4 rounded-lg font-medium text-sm transition-colors flex items-center justify-center gap-2 ${
+                          testTranscript.trim() && selectedTemplateId
+                            ? 'bg-green-600 hover:bg-green-700 text-white'
+                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        }`}
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                        Procesar transcripción
+                      </button>
+                    </div>
+                  </div>
                   )}
 
                   {recordingState === 'recording' && (
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-center gap-4">
-                        <div className="w-12 h-12 bg-red-500 rounded-full flex items-center justify-center">
-                          <div className="w-8 h-8 bg-red-600 rounded-full"></div>
+              <div className="space-y-3">
+                <div className="flex items-center justify-center gap-3">
+                  <div className="w-10 h-10 bg-red-500 rounded-full flex items-center justify-center">
+                    <div className="w-6 h-6 bg-red-600 rounded-full"></div>
                 </div>
-                        <div className="text-2xl font-mono font-bold text-red-600">
+                  <div className="text-xl font-mono font-bold text-red-600">
                           {formatTime(recordingTime)}
               </div>
             </div>
@@ -1043,21 +1937,21 @@ const MedicalConsultation = () => {
                       <div className="flex gap-2">
               <button 
                           onClick={pauseRecording}
-                          className="flex-1 py-3 px-4 border border-gray-300 rounded-lg bg-white hover:bg-gray-50 text-gray-700 flex items-center justify-center gap-2"
+                    className="flex-1 py-2 px-3 border border-gray-300 rounded-lg bg-white hover:bg-gray-50 text-gray-700 flex items-center justify-center gap-2 text-sm"
               >
-                          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
                             <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>
                 </svg>
                           <span>Pausar</span>
               </button>
                         <button
                           onClick={stopRecording}
-                          className="flex-1 py-3 px-4 rounded-lg bg-red-600 hover:bg-red-700 text-white flex items-center justify-center gap-2"
+                    className="flex-1 py-2 px-3 rounded-lg bg-red-600 hover:bg-red-700 text-white flex items-center justify-center gap-2 text-sm"
                         >
-                          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
                             <path d="M6 6h12v12H6z"/>
                 </svg>
-                          <span>Detener y generar notas</span>
+                    <span>Detener</span>
                         </button>
             </div>
 
@@ -1072,7 +1966,7 @@ const MedicalConsultation = () => {
                         {(interimTranscript || liveTranscript) && (
                           <div className="text-left">
                             <div className="text-xs text-gray-500 mb-1">Transcripción en vivo</div>
-                            <div className="text-sm text-gray-800 bg-white border border-gray-200 rounded-lg p-3 max-h-32 overflow-auto">
+                      <div className="text-xs text-gray-800 bg-white border border-gray-200 rounded-lg p-2 max-h-24 overflow-auto">
                               {interimTranscript || liveTranscript}
                     </div>
                     </div>
@@ -1082,21 +1976,21 @@ const MedicalConsultation = () => {
                   )}
 
                   {recordingState === 'paused' && (
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-center gap-4">
-                        <div className="w-12 h-12 bg-gray-400 rounded-full flex items-center justify-center">
-                          <div className="w-8 h-8 bg-gray-500 rounded-full"></div>
+              <div className="space-y-3">
+                <div className="flex items-center justify-center gap-3">
+                  <div className="w-10 h-10 bg-gray-400 rounded-full flex items-center justify-center">
+                    <div className="w-6 h-6 bg-gray-500 rounded-full"></div>
                 </div>
-                        <div className="text-2xl font-mono font-bold text-gray-600">
+                  <div className="text-xl font-mono font-bold text-gray-600">
                           {formatTime(recordingTime)}
               </div>
                 </div>
 
                         <button
                         onClick={resumeRecording}
-                        className="w-full py-3 px-4 border border-gray-300 rounded-lg bg-white hover:bg-gray-50 text-gray-700 flex items-center justify-center gap-2"
+                  className="w-full py-2 px-3 border border-gray-300 rounded-lg bg-white hover:bg-gray-50 text-gray-700 flex items-center justify-center gap-2 text-sm"
                       >
-                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
                           <path d="M8 5v14l11-7z"/>
                         </svg>
                         <span>Continuar</span>
@@ -1105,79 +1999,133 @@ const MedicalConsultation = () => {
                   )}
 
                   {recordingState === 'processing' && (
-                    <div className="flex flex-col items-center justify-center py-8">
-                      <div className="relative w-16 h-16 mb-4">
+              <div className="flex flex-col items-center justify-center py-4">
+                <div className="relative w-12 h-12 mb-3">
                         <div className="absolute inset-0 border-4 border-blue-200 rounded-full"></div>
                         <div className="absolute inset-0 border-4 border-blue-600 rounded-full border-t-transparent animate-spin"></div>
                         </div>
-                      <p className="text-gray-600 text-sm">Procesando audio...</p>
+                <p className="text-gray-600 text-xs">Procesando audio...</p>
                       </div>
                     )}
 
                   {recordingState === 'suggestions' && Object.keys(aiSuggestions).length > 0 && (
-                    <div className="space-y-3">
+              <div className="space-y-2 max-h-48 overflow-y-auto">
                       {Object.keys(aiSuggestions).map(fieldId => {
                         const field = selectedTemplateData?.fields?.find(f => f.id === fieldId);
-                        // Solo mostrar sugerencias para campos que existen en la plantilla
                         if (!field) {
                           console.warn('⚠️ Sugerencia ignorada en frontend: campo no existe:', fieldId);
                           return null;
                         }
                         
                         return (
-                          <div key={fieldId} className="bg-white border border-blue-200 rounded-lg p-4 shadow-sm">
-                            <div className="flex items-start justify-between gap-4">
+                          <div key={fieldId} className="bg-white border border-blue-200 rounded-lg p-3 shadow-sm">
+                            <div className="flex items-start justify-between gap-2">
                               <div className="flex-1">
-                                <div className="font-medium text-gray-800 mb-1">{field.name}</div>
-                                <div className="text-sm text-gray-600 whitespace-pre-wrap">{aiSuggestions[fieldId]}</div>
+                                <div className="font-medium text-gray-800 mb-1 text-sm">{field.name}</div>
+                                <div className="text-xs text-gray-600 whitespace-pre-wrap line-clamp-2">{aiSuggestions[fieldId]}</div>
                               </div>
-              <button 
+                              <button 
                                 onClick={(e) => {
                                   e.preventDefault();
                                   e.stopPropagation();
-                                  console.log('🔘 Click en añadir:', { fieldId, fieldName: field.name, value: aiSuggestions[fieldId] });
                                   addSuggestion(fieldId, aiSuggestions[fieldId]);
                                 }}
-                                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors flex-shrink-0 font-medium cursor-pointer"
+                                className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded-lg transition-colors flex-shrink-0 font-medium"
                               >
                                 + Añadir
-              </button>
-            </div>
-          </div>
-        );
+                              </button>
+                            </div>
+                          </div>
+                        );
                       }).filter(Boolean)}
                       <button
                         onClick={addAllSuggestions}
-                        className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium"
+                  className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium text-sm"
                       >
                         + Añadir todas las sugerencias de la IA
                       </button>
               </div>
                   )}
-            </div>
-              </div>
+          </div>
+      </div>
+    );
+  };
 
-              {/* Panel derecho - Formulario de Consulta */}
-                <div className="space-y-6">
-                  <div>
-                  <h2 className="text-2xl font-semibold text-gray-800 mb-2">Consulta</h2>
-                  <p className="text-gray-600 text-sm">
-                    {selectedTemplateData
-                      ? `Campos de la plantilla "${selectedTemplateData.name}". Respóndelos tú o deja que el Asistente AI lo haga por ti.`
-                      : 'Preguntas básicas del tipo de consulta que elegiste. Respóndelas tú o deja que el Asistente AI lo haga por ti.'}
+  const renderTabContent = () => {
+    switch (activeTab) {
+      case 'consulta':
+        return (
+          <div className="p-8">
+            <div className="space-y-6">
+              {/* Selector de plantilla - Siempre visible */}
+              <div>
+                <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                  Selecciona una plantilla
+                </h2>
+                
+                <p className="text-gray-600 mb-6">
+                  Esta elección personaliza las preguntas de la entrevista médica y organiza los campos que verás a continuación, para que el registro sea más rápido, claro y enfocado en el paciente.
+                </p>
+                
+                <div className="mb-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Plantilla de la consulta
+                  </label>
+                  <div className="relative">
+                    <select 
+                      value={selectedTemplateId}
+                      onChange={(e) => setSelectedTemplateId(e.target.value)}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
+                    >
+                      <option value="">Selecciona una plantilla</option>
+                      {templates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
+                      <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Si la plantilla no se ajusta al motivo de consulta contacta a tu administrador
                   </p>
-                  </div>
-
-                <div className="space-y-4">
-                  {selectedTemplateData && selectedTemplateData.fields && selectedTemplateData.fields.length > 0 ? (
-                    selectedTemplateData.fields.map(field => renderTemplateField(field))
-                  ) : (
-                    <div className="text-center text-gray-500 py-8">
-                      Por favor selecciona una plantilla en el paso anterior
-                  </div>
-                  )}
                 </div>
               </div>
+
+              {/* Campos de la plantilla - Solo se muestran si hay plantilla seleccionada */}
+              {selectedTemplateId && selectedTemplateData && (
+                <div className="pt-6 border-t border-gray-200">
+                  <div className="mb-4">
+                    <h3 className="text-lg font-semibold text-gray-800 mb-2">Consulta</h3>
+                    <p className="text-gray-600 text-sm">
+                      Campos de la plantilla "{selectedTemplateData.name}". Respóndelos tú o deja que el Asistente AI lo haga por ti.
+                    </p>
+                  </div>
+
+                  <div className="space-y-4">
+                    {selectedTemplateData.fields && selectedTemplateData.fields.length > 0 ? (
+                      selectedTemplateData.fields.map(field => renderTemplateField(field))
+                    ) : (
+                      <div className="text-center text-gray-500 py-8">
+                        Esta plantilla no tiene campos configurados
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Mensaje cuando no hay plantilla seleccionada */}
+              {!selectedTemplateId && (
+                <div className="pt-6 border-t border-gray-200">
+                  <div className="text-center text-gray-500 py-8">
+                    <p>Selecciona una plantilla para ver los campos de la consulta</p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Botón Continuar */}
@@ -1192,9 +2140,7 @@ const MedicalConsultation = () => {
                 }`}
               >
                 <span>Continuar</span>
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
+                <ArrowRightIcon width={16} height={16} fill={validateTab('consulta') ? 'white' : '#9CA3AF'} />
               </button>
             </div>
           </div>
@@ -1416,100 +2362,6 @@ const MedicalConsultation = () => {
                 <h2 className="text-2xl font-semibold text-gray-800 mb-4">Análisis</h2>
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-6">
                   <p className="text-gray-600">Sección de análisis (a implementar)</p>
-                  </div>
-                  </div>
-                  
-              {/* Sección Fórmula Médica */}
-                  <div>
-                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Formula médica</h2>
-                
-                {/* Caja de información */}
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 mb-6">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-4 flex-1">
-                      <div className="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
-                        <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                        </svg>
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="font-semibold text-gray-800 mb-2">Medicamentos</h3>
-                        <p className="text-sm text-gray-600">
-                          Análisis exhaustivo basado en la información del paciente y de la consulta. Es responsabilidad del profesional revisar y modificarlos en caso de ser necesario.
-                        </p>
-                      </div>
-                    </div>
-                    <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm flex items-center gap-2 ml-4">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                      <span>Generar una nueva formula</span>
-                    </button>
-                  </div>
-                  </div>
-                  
-                {/* Búsqueda de medicamentos */}
-                <div className="mb-6">
-                  <div className="flex gap-2">
-                    <div className="flex-1 relative">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                        <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                        </svg>
-                      </div>
-                    <input
-                        type="text"
-                        value={medicationSearch}
-                        onChange={(e) => setMedicationSearch(e.target.value)}
-                        placeholder="Ingresa el Nombre del Medicamento"
-                        className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                    <button className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">
-                      Buscar
-                    </button>
-                </div>
-              </div>
-
-                {/* Grid de medicamentos */}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {[1, 2, 3, 4, 5, 6, 7, 8].map((med) => (
-                    <div key={med} className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
-                      <div className="relative mb-3">
-                        <div className="w-full h-32 bg-gray-100 rounded-lg flex items-center justify-center">
-                          <svg className="w-12 h-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                          </svg>
-              </div>
-                        <div className="absolute top-2 right-2 bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full flex items-center gap-1">
-                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                          </svg>
-                          <span>Disponible</span>
-            </div>
-                      </div>
-                      <div className="text-xs text-blue-600 mb-1">IBUPROFENO</div>
-                      <div className="font-semibold text-gray-800 mb-2">Aspirina</div>
-                      <div className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full inline-block mb-2">400-800 mg</div>
-                      <p className="text-xs text-gray-600 mb-3">
-                        Para aliviar el malestar general. Toma entre 400-800 mg cada 4-6 horas según sea necesario.
-                      </p>
-                      <div className="flex gap-2">
-                        <button className="flex-1 px-3 py-2 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 text-xs rounded-lg flex items-center justify-center gap-1">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                          </svg>
-                          <span>Detalles de seguridad</span>
-                        </button>
-                        <button className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded-lg flex items-center justify-center gap-1">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                          </svg>
-                          <span>+ Incluir en la receta</span>
-                        </button>
-                      </div>
-                    </div>
-                  ))}
                 </div>
               </div>
             </div>
@@ -1526,9 +2378,7 @@ const MedicalConsultation = () => {
                 }`}
               >
                 <span>Continuar</span>
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
+                <ArrowRightIcon width={16} height={16} fill={validateTab('diagnostico') ? 'white' : '#9CA3AF'} />
               </button>
             </div>
           </div>
@@ -1567,6 +2417,45 @@ const MedicalConsultation = () => {
     return age;
   };
 
+  // Scroll automático al final del chat cuando hay nuevos mensajes
+  useEffect(() => {
+    if (chatMessagesEndRef.current) {
+      chatMessagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages]);
+
+  // Funciones para el chat
+  const handleSendMessage = (e) => {
+    e.preventDefault();
+    if (!newMessage.trim()) return;
+
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    const userName = user.name || user.firstName || 'Doctor';
+
+    const message = {
+      id: Date.now(),
+      text: newMessage,
+      sender: 'user',
+      senderName: userName,
+      timestamp: new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: true })
+    };
+
+    setChatMessages(prev => [...prev, message]);
+    setNewMessage('');
+
+    // Simular respuesta del paciente después de un breve delay
+    setTimeout(() => {
+      const patientMessage = {
+        id: Date.now() + 1,
+        text: "I'm doing well, thank you! How can I help you today?",
+        sender: 'patient',
+        senderName: patient?.first_name || 'Paciente',
+        timestamp: new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', hour12: true })
+      };
+      setChatMessages(prev => [...prev, patientMessage]);
+    }, 1000);
+  };
+
   const formatDate = (dateString) => {
     if (!dateString) return '';
     const date = new Date(dateString);
@@ -1574,89 +2463,89 @@ const MedicalConsultation = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="bg-gray-50">
       {loading ? (
-        <div className="flex justify-center items-center min-h-screen">
+        <div className="flex justify-center items-center min-h-[400px]">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
         </div>
       ) : (
         <>
-          {/* Header con información del paciente */}
-          <div className="bg-white border-b border-gray-200 px-6 py-4">
-            <div className="mb-4">
-              <Link 
-                to={`/patients/${patientId}/ficha`}
-                className="text-blue-600 hover:text-blue-700 flex items-center gap-2 text-sm"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-                <span>Volver al detalle de paciente</span>
-              </Link>
-            </div>
-            
-            {patient && (
-              <div className="bg-white border border-gray-200 rounded-lg p-4 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-                  <div className="w-16 h-16 bg-gray-200 rounded-full flex items-center justify-center flex-shrink-0">
-                    <svg className="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          {/* Caja de información del paciente */}
+          <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+            <div className="flex items-center gap-10">
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 bg-gray-200 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden">
+                  {patient?.photo_url ? (
+                    <img src={patient.photo_url} alt="Paciente" className="w-full h-full object-cover" />
+                  ) : (
+                    <svg className="w-7 h-7 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-            </svg>
-          </div>
-          <div>
-                    <h3 className="font-semibold text-gray-800 text-lg">
-                      {patient.first_name} {patient.last_name}
-                    </h3>
-            <p className="text-sm text-gray-600">
-                      {getPatientAge()} años • {patient.blood_type || 'N/A'} • Última visita: {formatDate(patient.last_visit) || 'N/A'}
-            </p>
-          </div>
-        </div>
-                <div className="text-right">
-                  {patient.allergies && (
-                    <div className="flex items-center gap-2 mb-2">
-                      <svg className="w-5 h-5 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                      </svg>
-                      <span className="text-sm text-gray-700">Alergias:</span>
-                      <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded-full">{patient.allergies}</span>
-      </div>
-                  )}
-                  {patient.conditions && typeof patient.conditions === 'string' && (
-                    <div className="flex items-center gap-2">
-                      <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-                      <span className="text-sm text-gray-700">Condiciones:</span>
-                      {patient.conditions.split(',').map((cond, idx) => (
-                        <span key={idx} className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded-full">
-                          {cond.trim()}
-                        </span>
-                      ))}
-                    </div>
+                    </svg>
                   )}
                 </div>
+                <div>
+                  <h3 className="font-semibold text-gray-800 text-lg">
+                    {patient?.first_name} {patient?.last_name}
+                  </h3>
+                  <p className="text-sm text-gray-500">
+                    {getPatientAge()} años • {patient?.blood_type || 'N/A'} • Última visita: {formatDate(patient?.last_visit) || 'N/A'}
+                  </p>
+                </div>
               </div>
-            )}
+              <div className="flex items-start gap-1 flex-col">
+                {/* Alergias */}
+                <div className="flex items-center gap-2">
+                  <AllergyIcon width={14} height={13} stroke="#FF0000" />
+                  <span className="text-sm text-gray-600">Alergias:</span>
+                  <div className="flex gap-1">
+                    {patient?.allergies && patient.allergies.length > 0 ? (
+                      patient.allergies.map((allergy, idx) => (
+                        <span key={idx} className="px-2 py-0.5 bg-red-100 text-red-700 text-xs rounded-full">
+                          {allergy}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-sm text-gray-400">Ninguna</span>
+                    )}
+                  </div>
+                </div>
+                {/* Condiciones */}
+                <div className="flex items-center gap-2">
+                  <ConditionsIcon width={15} height={16} stroke="#737373" />
+                  <span className="text-sm text-gray-600">Condiciones:</span>
+                  <div className="flex gap-1">
+                    {patient?.conditions && patient.conditions.length > 0 ? (
+                      patient.conditions.map((condition, idx) => (
+                        <span key={idx} className="px-2 py-0.5 bg-gray-700 text-white text-xs rounded-full">
+                          {condition}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-sm text-gray-400">Ninguna</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Pasos de navegación */}
-          <div className="bg-white border-b border-gray-200 px-6 py-4">
-            <div className="flex items-center justify-center gap-8">
+          <div className="bg-white rounded-t-lg border border-gray-200 px-6">
+            <div className="flex items-center justify-center gap-8 mb-[-1px]">
               {[
-                { id: 'tipo-consulta', label: '1. Tipo de consulta', icon: '👤' },
-                { id: 'consulta', label: '2. Consulta', icon: '🎤' },
-                { id: 'diagnostico', label: '3. Diagnóstico', icon: '🧠' },
-                { id: 'finalizar', label: '4. Finalizar', icon: '📄' }
+                { id: 'consulta', label: '1. Consulta', Icon: MicrophoneIcon },
+                { id: 'diagnostico', label: '2. Diagnóstico', Icon: BrainIcon },
+                { id: 'finalizar', label: '3. Finalizar', Icon: DocumentIcon }
               ].map((step, index) => {
                 const isUnlocked = unlockedTabs.includes(step.id);
                 const isActive = activeTab === step.id;
+                const IconComponent = step.Icon;
                 return (
                   <button
                     key={step.id}
                     onClick={() => handleTabChange(step.id)}
                     disabled={!isUnlocked}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                    className={`flex items-center gap-2 px-4 py-3 transition-colors ${
                       isActive
                         ? 'text-blue-600 font-semibold border-b-2 border-blue-600'
                         : isUnlocked
@@ -1665,7 +2554,11 @@ const MedicalConsultation = () => {
                     }`}
                     title={!isUnlocked ? 'Completa los pasos anteriores para desbloquear esta sección' : ''}
                   >
-                    <span className="text-lg">{step.icon}</span>
+                    <IconComponent 
+                      width={16} 
+                      height={16} 
+                      stroke={isActive ? '#2563EB' : isUnlocked ? '#6A7282' : '#9CA3AF'} 
+                    />
                     <span className="text-sm">{step.label}</span>
                     {!isUnlocked && (
                       <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
@@ -1679,12 +2572,288 @@ const MedicalConsultation = () => {
           </div>
 
           {/* Contenido principal */}
-          <div className="px-6 py-6">
-            <div className="bg-white rounded-lg shadow-sm">
-              {renderTabContent()}
-            </div>
+          <div>
+            {isTelemedicine ? (
+              // Layout de telemedicina: video a la izquierda, contenido a la derecha
+              <div className="bg-white rounded-b-lg shadow-sm border border-gray-200 border-t-0">
+                <div className="flex">
+                  {/* Panel izquierdo - Video (50%) - Sticky */}
+                  <div className="p-4 self-start sticky top-20 border-r border-gray-200" style={{ width: '50%' }}>
+                    {/* Video SDK */}
+                    <div className="rounded-lg overflow-hidden bg-gray-900">
+                      {renderVideoPanel()}
+                    </div>
+                  </div>
+                  
+                  {/* Panel derecho - Contenido de la pestaña activa (50%) */}
+                  <div className="flex-1 p-6" style={{ width: '50%' }}>
+                    {renderTabContent()}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              // Layout normal para consultas presenciales
+              <div className="bg-white rounded-b-lg shadow-sm border border-gray-200 border-t-0">
+                <div className="flex">
+                  {/* Panel izquierdo - Contenido de la pestaña activa (65%) */}
+                  <div className="flex-1 p-6 border-r border-gray-200" style={{ width: '65%' }}>
+                    {renderTabContent()}
+                  </div>
+                  
+                  {/* Panel derecho - Asistente AI (35%) - Sticky */}
+                  {activeTab === 'consulta' && (
+                    <div className="p-4 self-start sticky top-20" style={{ width: '35%' }}>
+                      <div className="mb-3">
+                        <h3 className="text-lg font-semibold text-gray-800 mb-1">Asistente AI</h3>
+                        <p className="text-sm text-gray-600">
+                          Completa automáticamente la entrevista médica mientras hablas con el paciente. Solo activa el micrófono y continúa tu consulta con normalidad.
+                        </p>
+                      </div>
+
+                      <div className="bg-gray-50 rounded-lg p-4">
+                        {recordingState === 'idle' && (
+                          <div className="space-y-4">
+                            <button
+                              onClick={startRecording}
+                              className="w-full py-3 px-4 rounded-lg font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors flex items-center justify-center gap-2"
+                            >
+                              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                              </svg>
+                              <span>Activar asistente</span>
+                            </button>
+                            
+                            {/* Campo para transcripción de prueba */}
+                            <div className="border-t border-gray-200 pt-4">
+                              <p className="text-xs text-gray-500 mb-2">O pega una transcripción de prueba:</p>
+                              <textarea
+                                value={testTranscript}
+                                onChange={(e) => setTestTranscript(e.target.value)}
+                                placeholder="Pega aquí la transcripción de la consulta..."
+                                rows={4}
+                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                              />
+                              <button
+                                onClick={processTestTranscript}
+                                disabled={!testTranscript.trim() || !selectedTemplateId}
+                                className={`w-full mt-2 py-2 px-4 rounded-lg font-medium text-sm transition-colors flex items-center justify-center gap-2 ${
+                                  testTranscript.trim() && selectedTemplateId
+                                    ? 'bg-green-600 hover:bg-green-700 text-white'
+                                    : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                }`}
+                              >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                </svg>
+                                Procesar transcripción
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {recordingState === 'recording' && (
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-center gap-3">
+                              <div className="w-10 h-10 bg-red-500 rounded-full flex items-center justify-center">
+                                <div className="w-6 h-6 bg-red-600 rounded-full"></div>
+                              </div>
+                              <div className="text-xl font-mono font-bold text-red-600">
+                                {formatTime(recordingTime)}
+                              </div>
+                            </div>
+
+                            <div className="flex gap-2">
+                              <button 
+                                onClick={pauseRecording}
+                                className="flex-1 py-2 px-3 border border-gray-300 rounded-lg bg-white hover:bg-gray-50 text-gray-700 flex items-center justify-center gap-2 text-sm"
+                              >
+                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                                  <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>
+                                </svg>
+                                <span>Pausar</span>
+                              </button>
+                              <button
+                                onClick={stopRecording}
+                                className="flex-1 py-2 px-3 rounded-lg bg-red-600 hover:bg-red-700 text-white flex items-center justify-center gap-2 text-sm"
+                              >
+                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                                  <path d="M6 6h12v12H6z"/>
+                                </svg>
+                                <span>Detener</span>
+                              </button>
+                            </div>
+
+                            <div className="space-y-2">
+                              <div className="text-xs text-gray-600">Nivel de audio</div>
+                              <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                                <div 
+                                  className="h-full bg-blue-500 transition-all duration-100"
+                                  style={{ width: `${audioLevel * 100}%` }}
+                                ></div>
+                              </div>
+                              {(interimTranscript || liveTranscript) && (
+                                <div className="text-left">
+                                  <div className="text-xs text-gray-500 mb-1">Transcripción en vivo</div>
+                                  <div className="text-xs text-gray-800 bg-white border border-gray-200 rounded-lg p-2 max-h-24 overflow-auto">
+                                    {interimTranscript || liveTranscript}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {recordingState === 'paused' && (
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-center gap-3">
+                              <div className="w-10 h-10 bg-gray-400 rounded-full flex items-center justify-center">
+                                <div className="w-6 h-6 bg-gray-500 rounded-full"></div>
+                              </div>
+                              <div className="text-xl font-mono font-bold text-gray-600">
+                                {formatTime(recordingTime)}
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={resumeRecording}
+                              className="w-full py-2 px-3 border border-gray-300 rounded-lg bg-white hover:bg-gray-50 text-gray-700 flex items-center justify-center gap-2 text-sm"
+                            >
+                              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M8 5v14l11-7z"/>
+                              </svg>
+                              <span>Reanudar</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {recordingState === 'processing' && (
+                          <div className="text-center py-4">
+                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-2"></div>
+                            <p className="text-sm text-gray-600">Procesando audio...</p>
+                          </div>
+                        )}
+
+                        {recordingState === 'suggestions' && Object.keys(aiSuggestions).length > 0 && (
+                          <div className="space-y-3">
+                            <div className="text-sm font-medium text-green-700 flex items-center gap-2">
+                              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                              </svg>
+                              Sugerencias generadas
+                            </div>
+                            <button
+                              onClick={() => setRecordingState('idle')}
+                              className="w-full py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm"
+                            >
+                              Nueva grabación
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </>
+      )}
+
+      {/* Chat flotante - Fijo en esquina inferior derecha */}
+      {isChatOpen && (
+        <div className="fixed bottom-4 right-4 w-96 h-[500px] bg-white rounded-lg shadow-2xl flex flex-col z-50 border border-gray-200">
+          {/* Header del chat */}
+          <div className="bg-gray-50 px-4 py-3 flex items-center justify-between border-b border-gray-200 rounded-t-lg">
+            <h3 className="text-lg font-semibold text-gray-800">Chat</h3>
+            <button
+              onClick={() => setIsChatOpen(false)}
+              className="w-8 h-8 rounded-full bg-gray-200 hover:bg-gray-300 flex items-center justify-center transition-colors"
+              title="Cerrar chat"
+            >
+              <CloseXIcon width={16} height={16} stroke="#5C5C5C" strokeWidth={2} />
+            </button>
+          </div>
+
+          {/* Área de mensajes */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white">
+            {chatMessages.length === 0 ? (
+              <div className="text-center text-gray-500 py-8">
+                <p className="text-sm">No hay mensajes aún</p>
+                <p className="text-xs mt-2">Comienza una conversación</p>
+              </div>
+            ) : (
+              chatMessages.map((message) => (
+                <div
+                  key={message.id}
+                  className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  {message.sender === 'patient' && (
+                    <div className="flex-shrink-0 mr-2">
+                      <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center">
+                        <UserIcon width={16} height={16} stroke="#5C5C5C" strokeWidth={2} />
+                      </div>
+                    </div>
+                  )}
+                  <div className={`max-w-[75%] ${message.sender === 'user' ? 'order-2' : ''}`}>
+                    {message.sender === 'patient' && (
+                      <div className="text-xs text-gray-600 mb-1 font-medium">
+                        {message.senderName}
+                      </div>
+                    )}
+                    <div
+                      className={`rounded-lg px-3 py-2 ${
+                        message.sender === 'user'
+                          ? 'bg-gray-200 text-gray-800'
+                          : 'bg-white border border-gray-200 text-gray-800'
+                      }`}
+                    >
+                      <p className="text-sm whitespace-pre-wrap">{message.text}</p>
+                    </div>
+                    <div className={`text-xs text-gray-500 mt-1 ${message.sender === 'user' ? 'text-right' : 'text-left'}`}>
+                      {message.timestamp}
+                    </div>
+                  </div>
+                  {message.sender === 'user' && (
+                    <div className="flex-shrink-0 ml-2 order-3">
+                      <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center">
+                        <UserIcon width={16} height={16} stroke="#5C5C5C" strokeWidth={2} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+            <div ref={chatMessagesEndRef} />
+          </div>
+
+          {/* Input de mensaje */}
+          <div className="border-t p-3 rounded-b-lg">
+            <form onSubmit={handleSendMessage} className="flex items-center gap-2">
+              <input
+                type="text"
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+                placeholder="Escribe aquí"
+                className="flex-1 px-3 py-2 border-0 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+              />
+              <button
+                type="button"
+                className="flex-shrink-0 w-8 h-8 flex items-center justify-center text-gray-500 hover:text-gray-700 transition-colors"
+                title="Adjuntar archivo"
+              >
+                <ClipIcon width={20} height={20} stroke="#5C5C5C" strokeWidth={2} />
+              </button>
+              <button
+                type="submit"
+                disabled={!newMessage.trim()}
+                className="flex-shrink-0 w-8 h-8 bg-gray-700 hover:bg-gray-800 rounded-full flex items-center justify-center text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Enviar mensaje"
+              >
+                <SendArrowIcon width={16} height={16} stroke="white" strokeWidth={2} />
+              </button>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

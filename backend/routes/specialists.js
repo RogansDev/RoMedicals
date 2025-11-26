@@ -1,9 +1,33 @@
 const express = require('express');
 const Joi = require('joi');
-const { query } = require('../config/database');
+const mysql = require('mysql2/promise');
 const { authenticateToken, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
+
+// Configuración de base de datos MySQL (usar la misma que server.js)
+const getMainDbConfig = () => {
+  return {
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'romedicals_main',
+    charset: 'utf8mb4'
+  };
+};
+
+// Función para obtener conexión a la base de datos de la empresa
+const getCompanyConnection = async (companyId) => {
+  if (!companyId) {
+    throw new Error('companyId es requerido');
+  }
+  const cleanCompanyId = companyId.replace(/-/g, '_');
+  const companyDbConfig = {
+    ...getMainDbConfig(),
+    database: `romedicals_company_${cleanCompanyId}`
+  };
+  return await mysql.createConnection(companyDbConfig);
+};
 
 // Validación de horario
 const scheduleSchema = Joi.object().pattern(
@@ -24,62 +48,126 @@ const scheduleSchema = Joi.object().pattern(
   })
 );
 
+// Función para crear tabla de horarios si no existe
+const ensureScheduleTable = async (connection) => {
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS specialist_schedules (
+      id VARCHAR(36) PRIMARY KEY,
+      user_id VARCHAR(36) NOT NULL,
+      schedule JSON,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_schedule (user_id),
+      INDEX idx_user_id (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+};
+
 // GET /api/specialists - Lista de especialistas (usuarios médicos)
 router.get('/', authenticateToken, async (req, res) => {
+  let connection = null;
   try {
-    const result = await query(
+    const companyId = req.user?.companyId;
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
+
+    connection = await getCompanyConnection(companyId);
+    await ensureScheduleTable(connection);
+
+    const [specialists] = await connection.execute(
       `SELECT 
         u.id,
-        u.first_name,
-        u.last_name,
+        u.firstName,
+        u.lastName,
         u.email,
-        u.specialty_id,
-        u.is_active,
-        s.name as specialty_name,
+        u.specialtyId,
+        u.isActive,
         ss.schedule
       FROM users u
-      LEFT JOIN specialties s ON u.specialty_id = s.id
       LEFT JOIN specialist_schedules ss ON ss.user_id = u.id
       WHERE u.role = 'medical_user'
-      ORDER BY u.first_name, u.last_name`
+      ORDER BY u.firstName, u.lastName`
     );
 
-    const specialists = result.rows.map(r => ({
+    const formattedSpecialists = specialists.map(r => ({
       id: r.id,
       title: 'Dr',
-      firstName: r.first_name,
-      lastName: r.last_name,
+      firstName: r.firstName,
+      lastName: r.lastName,
       email: r.email,
-      isActive: r.is_active,
-      specialties: r.specialty_id ? [{ id: r.specialty_id, name: r.specialty_name || '' }] : [],
-      schedule: r.schedule || null
+      isActive: r.isActive,
+      specialties: r.specialtyId ? [{ id: r.specialtyId, name: '' }] : [],
+      schedule: r.schedule ? (typeof r.schedule === 'string' ? JSON.parse(r.schedule) : r.schedule) : null
     }));
 
-    res.json(specialists);
+    res.json(formattedSpecialists);
   } catch (err) {
     console.error('Error listando especialistas:', err);
     res.status(500).json({ error: 'Error interno del servidor' });
+  } finally {
+    if (connection) {
+      await connection.close();
+    }
   }
 });
 
 // GET /api/specialists/:id/schedule - Obtener horario de un especialista
 router.get('/:id/schedule', authenticateToken, async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
-    const existing = await query('SELECT schedule FROM specialist_schedules WHERE user_id = $1', [id]);
-    if (existing.rows.length === 0) return res.json({ schedule: null });
-    return res.json({ schedule: existing.rows[0].schedule });
+    const companyId = req.user?.companyId;
+    
+    if (!companyId) {
+      console.error('Usuario sin companyId:', req.user);
+      return res.status(400).json({ 
+        error: 'Usuario no tiene companyId asignado',
+        message: 'El usuario no está asociado a una empresa'
+      });
+    }
+
+    connection = await getCompanyConnection(companyId);
+    await ensureScheduleTable(connection);
+
+    const [rows] = await connection.execute(
+      'SELECT schedule FROM specialist_schedules WHERE user_id = ?',
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.json({ schedule: null });
+    }
+
+    const schedule = rows[0].schedule;
+    const parsedSchedule = typeof schedule === 'string' ? JSON.parse(schedule) : schedule;
+    
+    return res.json({ schedule: parsedSchedule });
   } catch (err) {
     console.error('Error obteniendo horario:', err);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      message: 'No se pudo obtener el horario'
+    });
+  } finally {
+    if (connection) {
+      await connection.close();
+    }
   }
 });
 
 // PUT /api/specialists/:id/schedule - Guardar/actualizar horario
 router.put('/:id/schedule', authenticateToken, requirePermission('USERS', 'UPDATE'), async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
     const { schedule } = req.body || {};
+    const companyId = req.user?.companyId;
+    const { v4: uuidv4 } = require('uuid');
+
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
 
     const { error, value } = scheduleSchema.validate(schedule || {}, { abortEarly: false });
     if (error) {
@@ -89,33 +177,79 @@ router.put('/:id/schedule', authenticateToken, requirePermission('USERS', 'UPDAT
       });
     }
 
-    // Verificar que el usuario existe y es médico
-    const userResult = await query('SELECT id FROM users WHERE id = $1 AND role = $2', [id, 'medical_user']);
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Especialista no encontrado' });
+    connection = await getCompanyConnection(companyId);
+    await ensureScheduleTable(connection);
+
+    // Verificar que el usuario existe y es médico (opcional, puede estar en otra tabla)
+    try {
+      const [users] = await connection.execute(
+        'SELECT id FROM users WHERE id = ? AND role = ?',
+        [id, 'medical_user']
+      );
+      if (users.length === 0) {
+        console.warn(`Usuario ${id} no encontrado como médico, pero continuando con el guardado`);
+      }
+    } catch (dbError) {
+      console.warn('No se pudo verificar usuario, continuando:', dbError.message);
     }
 
     // Upsert por user_id
-    const sel = await query('SELECT id FROM specialist_schedules WHERE user_id = $1', [id]);
-    if (sel.rows.length > 0) {
-      const updated = await query(
-        'UPDATE specialist_schedules SET schedule = $1, updated_at = NOW() WHERE user_id = $2 RETURNING user_id, schedule',
-        [JSON.stringify(value || {}), id]
+    const [existing] = await connection.execute(
+      'SELECT id FROM specialist_schedules WHERE user_id = ?',
+      [id]
+    );
+
+    const scheduleJson = JSON.stringify(value || {});
+
+    if (existing.length > 0) {
+      await connection.execute(
+        'UPDATE specialist_schedules SET schedule = ?, updated_at = NOW() WHERE user_id = ?',
+        [scheduleJson, id]
       );
-      return res.json({ message: 'Horario actualizado', schedule: updated.rows[0].schedule });
+      
+      const [updated] = await connection.execute(
+        'SELECT schedule FROM specialist_schedules WHERE user_id = ?',
+        [id]
+      );
+      
+      const updatedSchedule = updated[0].schedule;
+      const parsedSchedule = typeof updatedSchedule === 'string' ? JSON.parse(updatedSchedule) : updatedSchedule;
+      
+      return res.json({ 
+        message: 'Horario actualizado', 
+        schedule: parsedSchedule 
+      });
     } else {
-      const inserted = await query(
-        'INSERT INTO specialist_schedules (user_id, schedule) VALUES ($1, $2) RETURNING user_id, schedule',
-        [id, JSON.stringify(value || {})]
+      const scheduleId = uuidv4();
+      await connection.execute(
+        'INSERT INTO specialist_schedules (id, user_id, schedule) VALUES (?, ?, ?)',
+        [scheduleId, id, scheduleJson]
       );
-      return res.status(201).json({ message: 'Horario guardado', schedule: inserted.rows[0].schedule });
+      
+      const [inserted] = await connection.execute(
+        'SELECT schedule FROM specialist_schedules WHERE user_id = ?',
+        [id]
+      );
+      
+      const insertedSchedule = inserted[0].schedule;
+      const parsedSchedule = typeof insertedSchedule === 'string' ? JSON.parse(insertedSchedule) : insertedSchedule;
+      
+      return res.status(201).json({ 
+        message: 'Horario guardado', 
+        schedule: parsedSchedule 
+      });
     }
   } catch (err) {
     console.error('Error guardando horario:', err);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      message: 'No se pudo guardar el horario'
+    });
+  } finally {
+    if (connection) {
+      await connection.close();
+    }
   }
 });
 
 module.exports = router;
-
-

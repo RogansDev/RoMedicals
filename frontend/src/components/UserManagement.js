@@ -376,13 +376,23 @@ const UserManagement = () => {
           
           {/* Botones de agregar - visibles según el tab activo */}
           {activeTab === 'medicos' && (
-            <button
-              onClick={handleAddNewSpecialist}
-              className="flex items-center space-x-2 bg-blue-600 text-white px-4 py-1 rounded-lg hover:bg-blue-700 transition-colors mb-3"
-            >
-              <PlusIcon className="w-4 h-4" />
-              <span>Agregar médico</span>
-            </button>
+            <div className="flex items-center space-x-2 mb-3">
+              <button
+                onClick={() => navigate('/user-management/doctor-schedule')}
+                className="flex items-center space-x-2 bg-green-600 text-white px-4 py-1 rounded-lg hover:bg-green-700 transition-colors"
+                title="Configurar horarios de disponibilidad de médicos"
+              >
+                <span>📅</span>
+                <span>Configurar Horarios</span>
+              </button>
+              <button
+                onClick={handleAddNewSpecialist}
+                className="flex items-center space-x-2 bg-blue-600 text-white px-4 py-1 rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                <PlusIcon className="w-4 h-4" />
+                <span>Agregar médico</span>
+              </button>
+            </div>
           )}
           
           {activeTab === 'pacientes' && (

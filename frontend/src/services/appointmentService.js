@@ -86,6 +86,7 @@ class AppointmentService {
 
       const normalizeType = (t) => {
         const v = String(t || "").toUpperCase().trim();
+        // No normalizar telemedicina/presencial, esos son valores de modality, no type
         if (v.includes("CONSULT")) return "CONSULTA";
         if (v.includes("CONTROL")) return "CONTROL";
         if (v.includes("EMER") || v.includes("URGEN")) return "URGENCIA";
@@ -104,6 +105,14 @@ class AppointmentService {
       const apptDate = appointmentData.appointmentDate || appointmentData.date;
       const apptTime = appointmentData.appointmentTime || appointmentData.time;
 
+      // Normalizar modality: aceptar 'telemedicina'/'TELEMEDICINA' o 'presencial'/'PRESENCIAL'
+      const normalizeModality = (m) => {
+        if (!m) return 'PRESENCIAL';
+        const v = String(m).toLowerCase().trim();
+        if (v === 'telemedicina') return 'TELEMEDICINA';
+        return 'PRESENCIAL';
+      };
+
       const payload = {
         patientId: coerceId(appointmentData.patientId),
         doctorId: coerceId(appointmentData.doctorId),
@@ -111,10 +120,13 @@ class AppointmentService {
         appointmentTime: normalizeTime(apptTime),
         duration: Number.isFinite(appointmentData.duration) ? appointmentData.duration : 30,
         type: normalizeType(appointmentData.type),
+        modality: normalizeModality(appointmentData.modality),
         status: normalizeStatus(appointmentData.status),
         reason: appointmentData.reason ?? "",
         notes: appointmentData.notes ?? "",
       };
+      
+      console.log('📦 Payload final para crear cita:', payload);
 
       if (appointmentData.specialtyId != null && String(appointmentData.specialtyId).trim() !== "") {
         payload.specialtyId = coerceId(appointmentData.specialtyId);

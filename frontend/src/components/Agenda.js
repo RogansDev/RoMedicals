@@ -295,6 +295,7 @@ const Agenda = () => {
         appointmentTime: apptTime,
         duration: 30, // Duración por defecto en minutos
         type: String(newAppointment.type || '').toUpperCase(),
+        modality: newAppointment.modality || 'PRESENCIAL', // Incluir modality
         status: String(newAppointment.status || '').toUpperCase(),
         reason: newAppointment.notes || '',
         notes: newAppointment.notes || ''

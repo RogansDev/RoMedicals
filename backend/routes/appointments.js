@@ -1,84 +1,500 @@
 const express = require('express');
 const Joi = require('joi');
-const { query } = require('../config/database');
+const mysql = require('mysql2/promise');
 const { authenticateToken, requirePermission } = require('../middleware/auth');
+const { v4: uuidv4 } = require('uuid');
 
 const router = express.Router();
+
+// Configuración de base de datos MySQL
+const getMainDbConfig = () => {
+  return {
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'romedicals_main',
+    charset: 'utf8mb4'
+  };
+};
+
+// Función para obtener conexión a la base de datos de la empresa
+const getCompanyConnection = async (companyId) => {
+  if (!companyId) {
+    throw new Error('companyId es requerido');
+  }
+  const cleanCompanyId = companyId.replace(/-/g, '_');
+  const companyDbConfig = {
+    ...getMainDbConfig(),
+    database: `romedicals_company_${cleanCompanyId}`
+  };
+  return await mysql.createConnection(companyDbConfig);
+};
+
+// Función para crear tablas si no existen y migrar estructura antigua
+const ensureTables = async (connection) => {
+  // Verificar si la tabla existe y qué estructura tiene
+  const [tables] = await connection.execute(
+    "SHOW TABLES LIKE 'appointments'"
+  );
+  
+  if (tables.length === 0) {
+    // Crear tabla nueva
+    await connection.execute(`
+      CREATE TABLE appointments (
+        id VARCHAR(36) PRIMARY KEY,
+        patient_id VARCHAR(36) NOT NULL,
+        doctor_id VARCHAR(36) NOT NULL,
+        appointment_date DATE NOT NULL,
+        appointment_time TIME NOT NULL,
+        duration INT DEFAULT 30,
+        type ENUM('CONSULTA', 'CONTROL', 'URGENCIA', 'PROCEDIMIENTO', 'OTRO') NOT NULL,
+        modality ENUM('TELEMEDICINA', 'PRESENCIAL') DEFAULT 'PRESENCIAL',
+        status ENUM('PROGRAMADA', 'CONFIRMADA', 'EN_PROGRESO', 'COMPLETADA', 'CANCELADA', 'NO_ASISTIO') DEFAULT 'PROGRAMADA',
+        reason TEXT,
+        notes TEXT,
+        insurance JSON,
+        specialty_id VARCHAR(36),
+        created_by VARCHAR(36),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_patient (patient_id),
+        INDEX idx_doctor (doctor_id),
+        INDEX idx_date (appointment_date),
+        INDEX idx_status (status),
+        INDEX idx_type (type)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  } else {
+    // Verificar columnas existentes y migrar si es necesario
+    const [columns] = await connection.execute(
+      "SHOW COLUMNS FROM appointments LIKE 'appointmentDate'"
+    );
+    
+    if (columns.length > 0) {
+      // La tabla tiene estructura antigua, migrar
+      try {
+        // Verificar y agregar columnas nuevas una por una
+        const [allColumns] = await connection.execute("SHOW COLUMNS FROM appointments");
+        const columnNames = allColumns.map(col => col.Field);
+        
+        if (!columnNames.includes('appointment_date')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN appointment_date DATE AFTER doctorId`);
+        }
+        if (!columnNames.includes('appointment_time')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN appointment_time TIME AFTER appointment_date`);
+        }
+        if (!columnNames.includes('duration')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN duration INT DEFAULT 30 AFTER appointment_time`);
+        }
+        if (!columnNames.includes('type')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN type ENUM('CONSULTA', 'CONTROL', 'URGENCIA', 'PROCEDIMIENTO', 'OTRO') DEFAULT 'CONSULTA' AFTER duration`);
+        }
+        if (!columnNames.includes('modality')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN modality ENUM('TELEMEDICINA', 'PRESENCIAL') DEFAULT 'PRESENCIAL' AFTER type`);
+        }
+        if (!columnNames.includes('reason')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN reason TEXT AFTER modality`);
+        }
+        if (!columnNames.includes('insurance')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN insurance JSON AFTER notes`);
+        }
+        if (!columnNames.includes('specialty_id')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN specialty_id VARCHAR(36) AFTER insurance`);
+        }
+        if (!columnNames.includes('created_by')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN created_by VARCHAR(36) AFTER specialty_id`);
+        }
+        
+        // Migrar datos de appointmentDate a appointment_date y appointment_time
+        if (columnNames.includes('appointmentDate')) {
+          await connection.execute(`
+            UPDATE appointments 
+            SET appointment_date = DATE(appointmentDate),
+                appointment_time = TIME(appointmentDate)
+            WHERE appointmentDate IS NOT NULL AND (appointment_date IS NULL OR appointment_time IS NULL)
+          `);
+          
+          // Eliminar la columna antigua appointmentDate después de migrar los datos
+          console.log('🔄 Eliminando columna antigua appointmentDate...');
+          await connection.execute(`ALTER TABLE appointments DROP COLUMN appointmentDate`);
+          console.log('✅ Columna appointmentDate eliminada correctamente');
+        }
+        
+        // Renombrar columnas si existen
+        if (columnNames.includes('patientId') && !columnNames.includes('patient_id')) {
+          await connection.execute(`ALTER TABLE appointments CHANGE COLUMN patientId patient_id VARCHAR(36) NOT NULL`);
+        }
+        if (columnNames.includes('doctorId') && !columnNames.includes('doctor_id')) {
+          await connection.execute(`ALTER TABLE appointments CHANGE COLUMN doctorId doctor_id VARCHAR(36) NOT NULL`);
+        }
+        if (columnNames.includes('createdAt') && !columnNames.includes('created_at')) {
+          await connection.execute(`ALTER TABLE appointments CHANGE COLUMN createdAt created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+        }
+        if (columnNames.includes('updatedAt') && !columnNames.includes('updated_at')) {
+          await connection.execute(`ALTER TABLE appointments CHANGE COLUMN updatedAt updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`);
+        }
+        
+        // Si no existen created_at o updated_at, crearlas
+        if (!columnNames.includes('created_at') && !columnNames.includes('createdAt')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+        }
+        if (!columnNames.includes('updated_at') && !columnNames.includes('updatedAt')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`);
+        }
+      } catch (migrateError) {
+        console.warn('Error en migración automática:', migrateError.message);
+      }
+    } else {
+      // Verificar si tiene appointment_date (estructura nueva)
+      const [newColumns] = await connection.execute(
+        "SHOW COLUMNS FROM appointments LIKE 'appointment_date'"
+      );
+      
+      if (newColumns.length === 0) {
+        // No tiene ninguna estructura conocida, crear columnas
+        const [allColumns] = await connection.execute("SHOW COLUMNS FROM appointments");
+        const columnNames = allColumns.map(col => col.Field);
+        
+        // Si existe appointmentDate (antigua), migrar datos y eliminarla
+        if (columnNames.includes('appointmentDate') && !columnNames.includes('appointment_date')) {
+          // Crear las nuevas columnas primero
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN appointment_date DATE`);
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN appointment_time TIME`);
+          
+          // Migrar datos
+          await connection.execute(`
+            UPDATE appointments 
+            SET appointment_date = DATE(appointmentDate),
+                appointment_time = TIME(appointmentDate)
+            WHERE appointmentDate IS NOT NULL
+          `);
+          
+          // Eliminar columna antigua
+          console.log('🔄 Eliminando columna antigua appointmentDate...');
+          await connection.execute(`ALTER TABLE appointments DROP COLUMN appointmentDate`);
+          console.log('✅ Columna appointmentDate eliminada correctamente');
+        } else {
+          // Si no existe appointmentDate, solo crear las nuevas columnas si no existen
+          if (!columnNames.includes('appointment_date')) {
+            await connection.execute(`ALTER TABLE appointments ADD COLUMN appointment_date DATE`);
+          }
+          if (!columnNames.includes('appointment_time')) {
+            await connection.execute(`ALTER TABLE appointments ADD COLUMN appointment_time TIME`);
+          }
+        }
+        
+        // Eliminar appointmentDate si todavía existe (por si acaso)
+        if (columnNames.includes('appointmentDate')) {
+          console.log('🔄 Eliminando columna antigua appointmentDate (verificación adicional)...');
+          try {
+            await connection.execute(`ALTER TABLE appointments DROP COLUMN appointmentDate`);
+            console.log('✅ Columna appointmentDate eliminada correctamente');
+          } catch (dropError) {
+            console.warn('⚠️ No se pudo eliminar appointmentDate (puede que ya no exista):', dropError.message);
+          }
+        }
+        if (!columnNames.includes('duration')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN duration INT DEFAULT 30`);
+        }
+        if (!columnNames.includes('type')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN type ENUM('CONSULTA', 'CONTROL', 'URGENCIA', 'PROCEDIMIENTO', 'OTRO') DEFAULT 'CONSULTA'`);
+        }
+        if (!columnNames.includes('modality')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN modality ENUM('TELEMEDICINA', 'PRESENCIAL') DEFAULT 'PRESENCIAL'`);
+        }
+        if (!columnNames.includes('reason')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN reason TEXT`);
+        }
+        if (!columnNames.includes('insurance')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN insurance JSON`);
+        }
+        if (!columnNames.includes('specialty_id')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN specialty_id VARCHAR(36)`);
+        }
+        if (!columnNames.includes('created_by')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN created_by VARCHAR(36)`);
+        }
+        if (!columnNames.includes('created_at') && !columnNames.includes('createdAt')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+        }
+        if (!columnNames.includes('updated_at') && !columnNames.includes('updatedAt')) {
+          await connection.execute(`ALTER TABLE appointments ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`);
+        }
+      }
+    }
+    
+    // Verificación final: eliminar appointmentDate si todavía existe
+    try {
+      const [allColumnsFinal] = await connection.execute("SHOW COLUMNS FROM appointments");
+      const columnNamesFinal = allColumnsFinal.map(col => col.Field);
+      if (columnNamesFinal.includes('appointmentDate')) {
+        console.log('🔄 Eliminando columna antigua appointmentDate (verificación final)...');
+        await connection.execute(`ALTER TABLE appointments DROP COLUMN appointmentDate`);
+        console.log('✅ Columna appointmentDate eliminada correctamente');
+      }
+    } catch (finalCheckError) {
+      console.warn('⚠️ Error en verificación final de appointmentDate:', finalCheckError.message);
+    }
+    
+    // Verificar y migrar el ENUM de status SIEMPRE (fuera de los bloques condicionales)
+    try {
+      const [statusColumn] = await connection.execute(
+        "SHOW COLUMNS FROM appointments WHERE Field = 'status'"
+      );
+      
+      if (statusColumn.length > 0) {
+        const statusType = statusColumn[0].Type;
+        console.log('Tipo actual de columna status:', statusType);
+        
+        // Verificar si tiene valores antiguos (en inglés/minúsculas)
+        const hasOldValues = statusType.includes("'scheduled'") || 
+                             statusType.includes("'completed'") || 
+                             statusType.includes("'cancelled'") ||
+                             statusType.includes("'no_show'");
+        
+        // Verificar si tiene los valores nuevos
+        const hasNewValues = statusType.includes("'PROGRAMADA'") && 
+                             statusType.includes("'CONFIRMADA'") && 
+                             statusType.includes("'EN_PROGRESO'");
+        
+        if (hasOldValues) {
+          console.log('🔄 Migrando ENUM de status de valores antiguos a nuevos...');
+          
+          // Paso 1: Expandir el ENUM para incluir ambos conjuntos de valores
+          await connection.execute(`
+            ALTER TABLE appointments 
+            MODIFY COLUMN status ENUM('scheduled', 'completed', 'cancelled', 'no_show', 'PROGRAMADA', 'CONFIRMADA', 'EN_PROGRESO', 'COMPLETADA', 'CANCELADA', 'NO_ASISTIO') 
+            DEFAULT 'PROGRAMADA'
+          `);
+          
+          // Paso 2: Migrar los datos existentes a los nuevos valores
+          await connection.execute(`
+            UPDATE appointments 
+            SET status = CASE 
+              WHEN status = 'scheduled' THEN 'PROGRAMADA'
+              WHEN status = 'completed' THEN 'COMPLETADA'
+              WHEN status = 'cancelled' THEN 'CANCELADA'
+              WHEN status = 'no_show' THEN 'NO_ASISTIO'
+              ELSE status
+            END
+          `);
+          
+          // Paso 3: Modificar el ENUM para incluir solo los nuevos valores
+          await connection.execute(`
+            ALTER TABLE appointments 
+            MODIFY COLUMN status ENUM('PROGRAMADA', 'CONFIRMADA', 'EN_PROGRESO', 'COMPLETADA', 'CANCELADA', 'NO_ASISTIO') 
+            DEFAULT 'PROGRAMADA'
+          `);
+          console.log('✅ ENUM de status migrado correctamente');
+        } else if (!hasNewValues) {
+          // El ENUM no tiene los valores correctos, actualizarlo
+          console.log('🔄 Actualizando ENUM de status a valores correctos...');
+          await connection.execute(`
+            ALTER TABLE appointments 
+            MODIFY COLUMN status ENUM('PROGRAMADA', 'CONFIRMADA', 'EN_PROGRESO', 'COMPLETADA', 'CANCELADA', 'NO_ASISTIO') 
+            DEFAULT 'PROGRAMADA'
+          `);
+          console.log('✅ ENUM de status actualizado correctamente');
+        } else {
+          console.log('✅ ENUM de status ya tiene los valores correctos');
+        }
+      } else {
+        // No existe la columna status, crearla
+        console.log('🔄 Creando columna status con valores correctos...');
+        await connection.execute(`
+          ALTER TABLE appointments 
+          ADD COLUMN status ENUM('PROGRAMADA', 'CONFIRMADA', 'EN_PROGRESO', 'COMPLETADA', 'CANCELADA', 'NO_ASISTIO') 
+          DEFAULT 'PROGRAMADA'
+        `);
+        console.log('✅ Columna status creada correctamente');
+      }
+    } catch (statusError) {
+      console.error('❌ Error migrando/actualizando columna status:', statusError.message);
+      console.error('Stack:', statusError.stack);
+      // Si falla, intentar crear la columna como VARCHAR temporalmente
+      try {
+        const [allColumns] = await connection.execute("SHOW COLUMNS FROM appointments");
+        const columnNames = allColumns.map(col => col.Field);
+        if (!columnNames.includes('status')) {
+          await connection.execute(`
+            ALTER TABLE appointments 
+            ADD COLUMN status VARCHAR(20) DEFAULT 'PROGRAMADA'
+          `);
+          console.log('✅ Columna status creada como VARCHAR (fallback)');
+        }
+      } catch (fallbackError) {
+        console.error('❌ Error en fallback de status:', fallbackError.message);
+      }
+    }
+    
+    // Verificación final: asegurar que la columna modality existe SIEMPRE
+    try {
+      const [modalityColumn] = await connection.execute(
+        "SHOW COLUMNS FROM appointments WHERE Field = 'modality'"
+      );
+      
+      if (modalityColumn.length === 0) {
+        console.log('🔄 Creando columna modality...');
+        await connection.execute(`
+          ALTER TABLE appointments 
+          ADD COLUMN modality ENUM('TELEMEDICINA', 'PRESENCIAL') DEFAULT 'PRESENCIAL'
+        `);
+        console.log('✅ Columna modality creada correctamente');
+      } else {
+        console.log('✅ Columna modality ya existe');
+      }
+    } catch (modalityError) {
+      console.error('❌ Error verificando/creando columna modality:', modalityError.message);
+      console.error('Stack:', modalityError.stack);
+    }
+  }
+
+  // Tabla appointment_custom_forms
+  await connection.execute(`
+    CREATE TABLE IF NOT EXISTS appointment_custom_forms (
+      id VARCHAR(36) PRIMARY KEY,
+      appointment_id VARCHAR(36) NOT NULL,
+      specialty_id VARCHAR(36),
+      form_id VARCHAR(36) NOT NULL,
+      \`values\` JSON,
+      created_by VARCHAR(36),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_appointment_form (appointment_id, form_id),
+      INDEX idx_appointment (appointment_id),
+      INDEX idx_form (form_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+};
+
 // --- Fichas personalizadas por atención ---
 const customFormPayloadSchema = Joi.object({
-  specialtyId: Joi.number().integer().positive().required(),
-  formId: Joi.number().integer().positive().required(),
+  specialtyId: Joi.string().optional().allow(null),
+  formId: Joi.string().required(),
   values: Joi.object().default({})
 });
 
 // GET /api/appointments/:id/custom-forms
 router.get('/:id/custom-forms', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
-    const result = await query('SELECT id, appointment_id, specialty_id, form_id, values, created_at, updated_at FROM appointment_custom_forms WHERE appointment_id = $1', [id]);
-    return res.json({ forms: result.rows });
+    const companyId = req.user?.companyId;
+    
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
+
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
+
+    const [rows] = await connection.execute(
+      'SELECT id, appointment_id, specialty_id, form_id, `values`, created_at, updated_at FROM appointment_custom_forms WHERE appointment_id = ?',
+      [id]
+    );
+
+    const forms = rows.map(row => ({
+      ...row,
+      values: typeof row.values === 'string' ? JSON.parse(row.values) : row.values
+    }));
+
+    return res.json({ forms });
   } catch (err) {
     console.error('Error obteniendo fichas de atención:', err);
     return res.status(500).json({ error: 'Error interno del servidor' });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
 // PUT /api/appointments/:id/custom-forms
 router.put('/:id/custom-forms', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'), async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
+    const companyId = req.user?.companyId;
     const { error, value } = customFormPayloadSchema.validate(req.body);
+    
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
+
     if (error) {
       return res.status(400).json({ error: 'Datos inválidos', details: error.details.map(d => d.message) });
     }
 
     const payload = value;
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
 
     // Verificar existencia de la cita
-    const appt = await query('SELECT id FROM appointments WHERE id = $1', [id]);
-    if (appt.rows.length === 0) return res.status(404).json({ error: 'Cita no encontrada' });
+    const [appt] = await connection.execute('SELECT id FROM appointments WHERE id = ?', [id]);
+    if (appt.length === 0) return res.status(404).json({ error: 'Cita no encontrada' });
 
     // Upsert por (appointment_id, form_id)
-    const existing = await query('SELECT id FROM appointment_custom_forms WHERE appointment_id = $1 AND form_id = $2', [id, payload.formId]);
+    const [existing] = await connection.execute(
+      'SELECT id FROM appointment_custom_forms WHERE appointment_id = ? AND form_id = ?',
+      [id, payload.formId]
+    );
+
+    const valuesJson = JSON.stringify(payload.values || {});
     let saved;
-    if (existing.rows.length > 0) {
-      const updated = await query(
-        'UPDATE appointment_custom_forms SET specialty_id = $1, values = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
-        [payload.specialtyId, JSON.stringify(payload.values || {}), existing.rows[0].id]
+
+    if (existing.length > 0) {
+      await connection.execute(
+        'UPDATE appointment_custom_forms SET specialty_id = ?, `values` = ?, updated_at = NOW() WHERE id = ?',
+        [payload.specialtyId, valuesJson, existing[0].id]
       );
-      saved = updated.rows[0];
+      const [updated] = await connection.execute(
+        'SELECT * FROM appointment_custom_forms WHERE id = ?',
+        [existing[0].id]
+      );
+      saved = updated[0];
     } else {
-      const inserted = await query(
-        'INSERT INTO appointment_custom_forms (appointment_id, specialty_id, form_id, values, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        [id, payload.specialtyId, payload.formId, JSON.stringify(payload.values || {}), req.user.id]
+      const formId = uuidv4();
+      await connection.execute(
+        'INSERT INTO appointment_custom_forms (id, appointment_id, specialty_id, form_id, `values`, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+        [formId, id, payload.specialtyId, payload.formId, valuesJson, req.user.id]
       );
-      saved = inserted.rows[0];
+      const [inserted] = await connection.execute(
+        'SELECT * FROM appointment_custom_forms WHERE id = ?',
+        [formId]
+      );
+      saved = inserted[0];
     }
 
+    saved.values = typeof saved.values === 'string' ? JSON.parse(saved.values) : saved.values;
     return res.json({ message: 'Ficha guardada', form: saved });
   } catch (err) {
     console.error('Error guardando ficha de atención:', err);
     return res.status(500).json({ error: 'Error interno del servidor' });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
 // Esquemas de validación
-// Crear: exige fecha futura
 const appointmentCreateSchema = Joi.object({
-  patientId: Joi.number().integer().positive().required().messages({
-    'number.base': 'El ID del paciente debe ser un número',
-    'number.integer': 'El ID del paciente debe ser un número entero',
-    'number.positive': 'El ID del paciente debe ser positivo',
+  patientId: Joi.string().required().messages({
     'any.required': 'El ID del paciente es requerido'
   }),
-  doctorId: Joi.number().integer().positive().required().messages({
-    'number.base': 'El ID del doctor debe ser un número',
-    'number.integer': 'El ID del doctor debe ser un número entero',
-    'number.positive': 'El ID del doctor debe ser positivo',
+  doctorId: Joi.string().required().messages({
     'any.required': 'El ID del doctor es requerido'
   }),
-  appointmentDate: Joi.date().min('now').required().messages({
-    'date.min': 'La fecha de la cita debe ser futura',
+  appointmentDate: Joi.date().custom((value, helpers) => {
+    // Permitir el día de hoy y fechas futuras, pero no fechas pasadas
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // Inicio del día de hoy
+    
+    const appointmentDate = new Date(value);
+    appointmentDate.setHours(0, 0, 0, 0); // Inicio del día de la cita
+    
+    if (appointmentDate < today) {
+      return helpers.error('date.min');
+    }
+    return value;
+  }).required().messages({
+    'date.min': 'La fecha de la cita no puede ser pasada',
     'any.required': 'La fecha de la cita es requerida'
   }),
   appointmentTime: Joi.string().pattern(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/).required().messages({
@@ -86,14 +502,15 @@ const appointmentCreateSchema = Joi.object({
     'any.required': 'La hora de la cita es requerida'
   }),
   duration: Joi.number().integer().min(15).max(480).default(30).messages({
-    'number.base': 'La duración debe ser un número',
-    'number.integer': 'La duración debe ser un número entero',
     'number.min': 'La duración mínima es 15 minutos',
     'number.max': 'La duración máxima es 480 minutos (8 horas)'
   }),
   type: Joi.string().valid('CONSULTA', 'CONTROL', 'URGENCIA', 'PROCEDIMIENTO', 'OTRO').required().messages({
     'any.only': 'El tipo debe ser CONSULTA, CONTROL, URGENCIA, PROCEDIMIENTO u OTRO',
     'any.required': 'El tipo de cita es requerido'
+  }),
+  modality: Joi.string().valid('TELEMEDICINA', 'PRESENCIAL').default('PRESENCIAL').messages({
+    'any.only': 'La modalidad debe ser TELEMEDICINA o PRESENCIAL'
   }),
   status: Joi.string().valid('PROGRAMADA', 'CONFIRMADA', 'EN_PROGRESO', 'COMPLETADA', 'CANCELADA', 'NO_ASISTIO').default('PROGRAMADA').messages({
     'any.only': 'El estado debe ser PROGRAMADA, CONFIRMADA, EN_PROGRESO, COMPLETADA, CANCELADA o NO_ASISTIO'
@@ -105,17 +522,19 @@ const appointmentCreateSchema = Joi.object({
     policyNumber: Joi.string().max(50).optional().allow(''),
     coverage: Joi.string().max(200).optional().allow('')
   }).optional(),
-  specialtyId: Joi.number().integer().positive().optional().allow(null)
+  specialtyId: Joi.string().optional().allow(null)
 });
 
-// Update: permite actualizar citas pasadas (sin min('now'))
 const appointmentUpdateSchema = Joi.object({
-  patientId: Joi.number().integer().positive().required(),
-  doctorId: Joi.number().integer().positive().required(),
+  patientId: Joi.string().required(),
+  doctorId: Joi.string().required(),
   appointmentDate: Joi.date().required(),
   appointmentTime: Joi.string().pattern(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/).required(),
   duration: Joi.number().integer().min(15).max(480).default(30),
   type: Joi.string().valid('CONSULTA', 'CONTROL', 'URGENCIA', 'PROCEDIMIENTO', 'OTRO').required(),
+  modality: Joi.string().valid('TELEMEDICINA', 'PRESENCIAL').default('PRESENCIAL').messages({
+    'any.only': 'La modalidad debe ser TELEMEDICINA o PRESENCIAL'
+  }),
   status: Joi.string().valid('PROGRAMADA', 'CONFIRMADA', 'EN_PROGRESO', 'COMPLETADA', 'CANCELADA', 'NO_ASISTIO').required(),
   reason: Joi.string().max(500).optional().allow(''),
   notes: Joi.string().max(1000).optional().allow(''),
@@ -124,22 +543,25 @@ const appointmentUpdateSchema = Joi.object({
     policyNumber: Joi.string().max(50).optional().allow(''),
     coverage: Joi.string().max(200).optional().allow('')
   }).optional(),
-  specialtyId: Joi.number().integer().positive().optional().allow(null)
+  specialtyId: Joi.string().optional().allow(null)
 });
 
-// Update solo doctor
 const appointmentDoctorSchema = Joi.object({
-  doctorId: Joi.number().integer().positive().required().messages({
-    'number.base': 'El ID del doctor debe ser un número',
-    'number.integer': 'El ID del doctor debe ser un número entero',
-    'number.positive': 'El ID del doctor debe ser positivo',
+  doctorId: Joi.string().required().messages({
     'any.required': 'El ID del doctor es requerido'
   })
 });
 
 // GET /api/appointments - Listar citas con filtros
 router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), async (req, res) => {
+  let connection = null;
   try {
+    const companyId = req.user?.companyId;
+    
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
+
     const { 
       page = 1, 
       limit = 20, 
@@ -154,54 +576,66 @@ router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), as
       sortOrder = 'ASC'
     } = req.query;
 
-    const offset = (page - 1) * limit;
+    // Convertir page y limit a números
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 20;
+    const offset = (pageNum - 1) * limitNum;
+    
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
+    
+    // Verificar si la columna modality existe
+    let hasModalityColumn = false;
+    try {
+      const [columns] = await connection.execute("SHOW COLUMNS FROM appointments WHERE Field = 'modality'");
+      hasModalityColumn = columns.length > 0;
+      console.log('🔍 Verificación de columna modality:', {
+        existe: hasModalityColumn,
+        columnasEncontradas: columns.length,
+        detalles: columns.length > 0 ? columns[0] : null
+      });
+    } catch (err) {
+      console.warn('Error verificando columna modality:', err.message);
+      hasModalityColumn = false;
+    }
     
     // Construir condiciones de búsqueda
     let whereConditions = [];
     let queryParams = [];
-    let paramIndex = 1;
 
     if (patientId) {
-      whereConditions.push(`a.patient_id = $${paramIndex}`);
-      queryParams.push(parseInt(patientId));
-      paramIndex++;
+      whereConditions.push('a.patient_id = ?');
+      queryParams.push(patientId);
     }
 
     if (doctorId) {
-      whereConditions.push(`a.doctor_id = $${paramIndex}`);
-      queryParams.push(parseInt(doctorId));
-      paramIndex++;
+      whereConditions.push('a.doctor_id = ?');
+      queryParams.push(doctorId);
     }
 
     if (status) {
-      whereConditions.push(`a.status = $${paramIndex}`);
+      whereConditions.push('a.status = ?');
       queryParams.push(status);
-      paramIndex++;
     }
 
     if (type) {
-      whereConditions.push(`a.type = $${paramIndex}`);
+      whereConditions.push('a.type = ?');
       queryParams.push(type);
-      paramIndex++;
     }
 
     if (dateFrom) {
-      whereConditions.push(`a.appointment_date >= $${paramIndex}`);
+      whereConditions.push('a.appointment_date >= ?');
       queryParams.push(dateFrom);
-      paramIndex++;
     }
 
     if (dateTo) {
-      whereConditions.push(`a.appointment_date <= $${paramIndex}`);
+      whereConditions.push('a.appointment_date <= ?');
       queryParams.push(dateTo);
-      paramIndex++;
     }
 
-    // Filtro por documento del paciente (coincide con patients o patients_old)
     if (patientDocument) {
-      whereConditions.push(`COALESCE(p.identification_number, po.document_number) = $${paramIndex}`);
-      queryParams.push(patientDocument);
-      paramIndex++;
+      whereConditions.push('(p.documentNumber = ? OR po.documentNumber = ?)');
+      queryParams.push(patientDocument, patientDocument);
     }
 
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
@@ -214,15 +648,36 @@ router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), as
     const finalSortOrder = allowedSortOrders.includes(sortOrder.toUpperCase()) ? sortOrder.toUpperCase() : 'ASC';
 
     // Consulta para obtener total de registros
-    const countQuery = `
-      SELECT COUNT(*) as total 
-      FROM appointments a 
-      ${whereClause}
-    `;
-    const countResult = await query(countQuery, queryParams);
-    const total = parseInt(countResult.rows[0].total);
+    const countQuery = `SELECT COUNT(*) as total FROM appointments a ${whereClause}`;
+    const [countResult] = await connection.execute(countQuery, [...queryParams]);
+    const total = parseInt(countResult[0].total);
 
-    // Consulta principal
+    // Verificar qué columnas de timestamp existen
+    const [timestampColumns] = await connection.execute("SHOW COLUMNS FROM appointments WHERE Field IN ('created_at', 'createdAt', 'updated_at', 'updatedAt')");
+    const timestampColNames = timestampColumns.map(col => col.Field);
+    const hasCreatedAt = timestampColNames.includes('created_at');
+    const hasCreatedAtOld = timestampColNames.includes('createdAt');
+    const hasUpdatedAt = timestampColNames.includes('updated_at');
+    const hasUpdatedAtOld = timestampColNames.includes('updatedAt');
+    
+    // Construir SELECT con columnas disponibles
+    const createdAtSelect = hasCreatedAt ? 'a.created_at' : (hasCreatedAtOld ? 'a.createdAt as created_at' : 'NULL as created_at');
+    const updatedAtSelect = hasUpdatedAt ? 'a.updated_at' : (hasUpdatedAtOld ? 'a.updatedAt as updated_at' : 'NULL as updated_at');
+    
+    // Crear una copia nueva de los parámetros para la consulta principal
+    const mainQueryParams = [...queryParams];
+    
+    // En MySQL, LIMIT con parámetros preparados puede ser problemático
+    // Usar valores directos en lugar de parámetros para LIMIT y OFFSET
+    const safeOffset = parseInt(offset) || 0;
+    const safeLimit = parseInt(limitNum) || 20;
+    
+    // Consulta principal - usar valores directos para LIMIT y OFFSET
+    // Incluir modality solo si la columna existe, usando COALESCE para manejar NULL
+    const modalitySelect = hasModalityColumn 
+      ? "COALESCE(a.modality, 'PRESENCIAL') as modality," 
+      : "'PRESENCIAL' as modality,";
+    console.log('🔍 Modality SELECT usado:', modalitySelect, '| hasModalityColumn:', hasModalityColumn);
     const mainQuery = `
       SELECT 
         a.id,
@@ -232,37 +687,53 @@ router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), as
         a.appointment_time,
         a.duration,
         a.type,
+        ${modalitySelect}
         a.status,
         a.reason,
         a.notes,
         a.insurance,
         a.specialty_id,
-        a.created_at,
-        a.updated_at,
-        COALESCE(p.first_name, po.first_name) as patient_first_name,
-        COALESCE(p.last_name, po.last_name) as patient_last_name,
-        COALESCE(p.identification_number, po.document_number) as patient_document,
-        d.first_name as doctor_first_name,
-        d.last_name as doctor_last_name,
+        ${createdAtSelect},
+        ${updatedAtSelect},
+        COALESCE(p.firstName, po.firstName) as patient_first_name,
+        COALESCE(p.lastName, po.lastName) as patient_last_name,
+        COALESCE(p.documentNumber, po.documentNumber) as patient_document,
+        COALESCE(p.birthDate, po.birthDate) as patient_birth_date,
+        d.firstName as doctor_first_name,
+        d.lastName as doctor_last_name,
         s.name as specialty_name
       FROM appointments a
       LEFT JOIN patients p ON a.patient_id = p.id
-      LEFT JOIN patients_old po ON a.patient_id = po.id
+      LEFT JOIN patients po ON a.patient_id = po.id
       JOIN users d ON a.doctor_id = d.id
-      LEFT JOIN specialties s ON COALESCE(a.specialty_id, d.specialty_id) = s.id
+      LEFT JOIN specialties s ON a.specialty_id = s.id
       ${whereClause}
       ORDER BY a.${finalSortBy} ${finalSortOrder}
-      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
     `;
     
-    queryParams.push(parseInt(limit), offset);
-    const appointmentsResult = await query(mainQuery, queryParams);
+    const [appointmentsResult] = await connection.execute(mainQuery, mainQueryParams);
+    
+    // Log para debug de modality
+    if (appointmentsResult.length > 0) {
+      console.log('📋 Citas devueltas por el backend:');
+      appointmentsResult.forEach((apt, idx) => {
+        console.log(`  Cita ${idx + 1}:`, {
+          id: apt.id,
+          modality: apt.modality,
+          type: apt.type,
+          date: apt.appointment_date,
+          time: apt.appointment_time
+        });
+      });
+    }
 
-    const appointments = appointmentsResult.rows.map(appointment => ({
+    const appointments = appointmentsResult.map(appointment => ({
       ...appointment,
-      patientFullName: `${appointment.patient_first_name} ${appointment.patient_last_name}`,
-      doctorFullName: `${appointment.doctor_first_name} ${appointment.doctor_last_name}`,
-      appointmentDateTime: `${appointment.appointment_date}T${appointment.appointment_time}`
+      patientFullName: `${appointment.patient_first_name || ''} ${appointment.patient_last_name || ''}`.trim(),
+      doctorFullName: `${appointment.doctor_first_name || ''} ${appointment.doctor_last_name || ''}`.trim(),
+      appointmentDateTime: `${appointment.appointment_date}T${appointment.appointment_time}`,
+      insurance: typeof appointment.insurance === 'string' ? JSON.parse(appointment.insurance || '{}') : (appointment.insurance || {})
     }));
 
     res.json({
@@ -281,47 +752,56 @@ router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), as
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al obtener las citas'
     });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
 // GET /api/appointments/:id - Obtener cita específica
 router.get('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
+    const companyId = req.user?.companyId;
+    
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
 
-    const appointmentResult = await query(
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
+
+    const [appointmentResult] = await connection.execute(
       `SELECT 
         a.*,
-        COALESCE(p.first_name, po.first_name) as patient_first_name,
-        COALESCE(p.last_name, po.last_name) as patient_last_name,
-        COALESCE(p.identification_number, po.document_number) as patient_document,
-        COALESCE(p.birth_date, po.birth_date) as patient_birth_date,
-        COALESCE(p.gender, po.gender) as patient_gender,
-        COALESCE(p.mobile_phone, po.phone) as patient_phone,
+        COALESCE(p.firstName, po.firstName) as patient_first_name,
+        COALESCE(p.lastName, po.lastName) as patient_last_name,
+        COALESCE(p.documentNumber, po.documentNumber) as patient_document,
+        COALESCE(p.birthDate, po.birthDate) as patient_birth_date,
+        COALESCE(p.phone, po.phone) as patient_phone,
         COALESCE(p.email, po.email) as patient_email,
-        d.first_name as doctor_first_name,
-        d.last_name as doctor_last_name,
-        s.name as specialty_name
+        d.firstName as doctor_first_name,
+        d.lastName as doctor_last_name
       FROM appointments a
       LEFT JOIN patients p ON a.patient_id = p.id
-      LEFT JOIN patients_old po ON a.patient_id = po.id
+      LEFT JOIN patients po ON a.patient_id = po.id
       JOIN users d ON a.doctor_id = d.id
-      LEFT JOIN specialties s ON COALESCE(a.specialty_id, d.specialty_id) = s.id
-      WHERE a.id = $1`,
+      WHERE a.id = ?`,
       [id]
     );
 
-    if (appointmentResult.rows.length === 0) {
+    if (appointmentResult.length === 0) {
       return res.status(404).json({
         error: 'Cita no encontrada',
         message: 'La cita con el ID especificado no existe'
       });
     }
 
-    const appointment = appointmentResult.rows[0];
-    appointment.patientFullName = `${appointment.patient_first_name} ${appointment.patient_last_name}`;
-    appointment.doctorFullName = `${appointment.doctor_first_name} ${appointment.doctor_last_name}`;
+    const appointment = appointmentResult[0];
+    appointment.patientFullName = `${appointment.patient_first_name || ''} ${appointment.patient_last_name || ''}`.trim();
+    appointment.doctorFullName = `${appointment.doctor_first_name || ''} ${appointment.doctor_last_name || ''}`.trim();
     appointment.appointmentDateTime = `${appointment.appointment_date}T${appointment.appointment_time}`;
+    appointment.insurance = typeof appointment.insurance === 'string' ? JSON.parse(appointment.insurance || '{}') : (appointment.insurance || {});
 
     res.json({ appointment });
 
@@ -331,17 +811,28 @@ router.get('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'READ'),
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al obtener la cita'
     });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
 // POST /api/appointments - Crear nueva cita
 router.post('/', authenticateToken, requirePermission('APPOINTMENTS', 'CREATE'), async (req, res) => {
+  let connection = null;
   try {
-    // Depuración: ver payload recibido
-    try { console.debug('POST /api/appointments body:', req.body); } catch (_) {}
+    const companyId = req.user?.companyId;
+    
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
+
+    console.log('📥 POST /api/appointments - Body recibido:', JSON.stringify(req.body, null, 2));
+    console.log('📥 Modality recibido:', req.body.modality);
+    
     // Validar datos de entrada
     const { error, value } = appointmentCreateSchema.validate(req.body);
     if (error) {
+      console.error('❌ Error de validación:', error.details);
       return res.status(400).json({
         error: 'Datos de entrada inválidos',
         details: error.details.map(detail => detail.message)
@@ -349,14 +840,18 @@ router.post('/', authenticateToken, requirePermission('APPOINTMENTS', 'CREATE'),
     }
 
     const appointmentData = value;
+    console.log('✅ Datos validados:', JSON.stringify(appointmentData, null, 2));
+    console.log('✅ Modality validado:', appointmentData.modality);
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
 
     // Verificar si el paciente existe
-    const patientResult = await query(
-      'SELECT id FROM patients WHERE id = $1',
+    const [patientResult] = await connection.execute(
+      'SELECT id FROM patients WHERE id = ?',
       [appointmentData.patientId]
     );
 
-    if (patientResult.rows.length === 0) {
+    if (patientResult.length === 0) {
       return res.status(404).json({
         error: 'Paciente no encontrado',
         message: 'El paciente especificado no existe'
@@ -364,37 +859,33 @@ router.post('/', authenticateToken, requirePermission('APPOINTMENTS', 'CREATE'),
     }
 
     // Verificar si el doctor existe y es médico
-    const doctorResult = await query(
-      'SELECT id, role FROM users WHERE id = $1 AND role = $2',
+    const [doctorResult] = await connection.execute(
+      'SELECT id, role FROM users WHERE id = ? AND role = ?',
       [appointmentData.doctorId, 'medical_user']
     );
 
-    if (doctorResult.rows.length === 0) {
+    if (doctorResult.length === 0) {
       return res.status(404).json({
         error: 'Doctor no encontrado',
         message: 'El doctor especificado no existe o no es un usuario médico'
       });
     }
 
-    // Verificar conflictos de horario
-    const conflictResult = await query(
+    // Verificar conflictos de horario (simplificado para MySQL)
+    const [conflictResult] = await connection.execute(
       `SELECT id FROM appointments 
-       WHERE doctor_id = $1 
-       AND appointment_date = $2 
+       WHERE doctor_id = ? 
+       AND appointment_date = ? 
        AND status NOT IN ('CANCELADA', 'NO_ASISTIO')
-       AND (
-         (appointment_time <= $3 AND appointment_time + (duration || ' minutes')::interval > $3) OR
-         ($3 < appointment_time + (duration || ' minutes')::interval AND $3 + ($4 || ' minutes')::interval > appointment_time)
-       )`,
+       AND appointment_time = ?`,
       [
         appointmentData.doctorId,
         appointmentData.appointmentDate,
-        appointmentData.appointmentTime,
-        appointmentData.duration
+        appointmentData.appointmentTime
       ]
     );
 
-    if (conflictResult.rows.length > 0) {
+    if (conflictResult.length > 0) {
       return res.status(409).json({
         error: 'Conflicto de horario',
         message: 'El doctor ya tiene una cita programada en ese horario'
@@ -402,33 +893,74 @@ router.post('/', authenticateToken, requirePermission('APPOINTMENTS', 'CREATE'),
     }
 
     // Insertar nueva cita
-    const newAppointmentResult = await query(
+    const appointmentId = uuidv4();
+    const insuranceJson = appointmentData.insurance ? JSON.stringify(appointmentData.insurance) : null;
+    
+    const modalityValue = appointmentData.modality || 'PRESENCIAL';
+    console.log('💾 Insertando cita con modality:', modalityValue);
+    
+    await connection.execute(
       `INSERT INTO appointments (
-        patient_id, doctor_id, appointment_date, appointment_time, duration,
-        type, status, reason, notes, insurance, specialty_id, created_by, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-      RETURNING *`,
+        id, patient_id, doctor_id, appointment_date, appointment_time, duration,
+        type, modality, status, reason, notes, insurance, specialty_id, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        appointmentId,
         appointmentData.patientId,
         appointmentData.doctorId,
         appointmentData.appointmentDate,
         appointmentData.appointmentTime,
         appointmentData.duration,
         appointmentData.type,
+        modalityValue,
         appointmentData.status,
         appointmentData.reason || null,
         appointmentData.notes || null,
-        appointmentData.insurance ? JSON.stringify(appointmentData.insurance) : null,
+        insuranceJson,
         appointmentData.specialtyId || null,
         req.user.id
       ]
     );
+    
+    console.log('✅ Cita creada con ID:', appointmentId, 'y modality:', modalityValue);
 
-    const newAppointment = newAppointmentResult.rows[0];
+    const [newAppointment] = await connection.execute(
+      `SELECT 
+        a.*,
+        COALESCE(p.firstName, po.firstName) as patient_first_name,
+        COALESCE(p.lastName, po.lastName) as patient_last_name,
+        COALESCE(p.documentNumber, po.documentNumber) as patient_document,
+        d.firstName as doctor_first_name,
+        d.lastName as doctor_last_name
+      FROM appointments a
+      LEFT JOIN patients p ON a.patient_id = p.id
+      LEFT JOIN patients po ON a.patient_id = po.id
+      JOIN users d ON a.doctor_id = d.id
+      WHERE a.id = ?`,
+      [appointmentId]
+    );
+
+    const appointment = newAppointment[0];
+    const formattedAppointment = {
+      ...appointment,
+      patientFullName: `${appointment.patient_first_name || ''} ${appointment.patient_last_name || ''}`.trim(),
+      doctorFullName: `${appointment.doctor_first_name || ''} ${appointment.doctor_last_name || ''}`.trim(),
+      appointmentDateTime: appointment.appointment_date && appointment.appointment_time 
+        ? `${appointment.appointment_date}T${appointment.appointment_time}` 
+        : null,
+      insurance: typeof appointment.insurance === 'string' ? JSON.parse(appointment.insurance || '{}') : (appointment.insurance || {})
+    };
+    
+    console.log('✅ Cita creada, datos devueltos:', {
+      id: formattedAppointment.id,
+      appointment_date: formattedAppointment.appointment_date,
+      appointment_time: formattedAppointment.appointment_time,
+      appointmentDateTime: formattedAppointment.appointmentDateTime
+    });
 
     res.status(201).json({
       message: 'Cita creada exitosamente',
-      appointment: newAppointment
+      appointment: formattedAppointment
     });
 
   } catch (error) {
@@ -437,13 +969,21 @@ router.post('/', authenticateToken, requirePermission('APPOINTMENTS', 'CREATE'),
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al crear la cita'
     });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
 // PUT /api/appointments/:id - Actualizar cita
 router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'), async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
+    const companyId = req.user?.companyId;
+    
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
 
     // Validar datos de entrada
     const { error, value } = appointmentUpdateSchema.validate(req.body);
@@ -455,14 +995,16 @@ router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'
     }
 
     const appointmentData = value;
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
 
     // Verificar si la cita existe
-    const existingAppointment = await query(
-      'SELECT id, status FROM appointments WHERE id = $1',
+    const [existingAppointment] = await connection.execute(
+      'SELECT id, status FROM appointments WHERE id = ?',
       [id]
     );
 
-    if (existingAppointment.rows.length === 0) {
+    if (existingAppointment.length === 0) {
       return res.status(404).json({
         error: 'Cita no encontrada',
         message: 'La cita con el ID especificado no existe'
@@ -470,7 +1012,7 @@ router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'
     }
 
     // No permitir modificar citas completadas o canceladas
-    if (existingAppointment.rows[0].status === 'COMPLETADA' || existingAppointment.rows[0].status === 'CANCELADA') {
+    if (existingAppointment[0].status === 'COMPLETADA' || existingAppointment[0].status === 'CANCELADA') {
       return res.status(400).json({
         error: 'Cita no modificable',
         message: 'No se puede modificar una cita completada o cancelada'
@@ -478,26 +1020,22 @@ router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'
     }
 
     // Verificar conflictos de horario (excluyendo la cita actual)
-    const conflictResult = await query(
+    const [conflictResult] = await connection.execute(
       `SELECT id FROM appointments 
-       WHERE doctor_id = $1 
-       AND appointment_date = $2 
-       AND id != $3
+       WHERE doctor_id = ? 
+       AND appointment_date = ? 
+       AND id != ?
        AND status NOT IN ('CANCELADA', 'NO_ASISTIO')
-       AND (
-         (appointment_time <= $4 AND appointment_time + (duration || ' minutes')::interval > $4) OR
-         ($4 < appointment_time + (duration || ' minutes')::interval AND $4 + ($5 || ' minutes')::interval > appointment_time)
-       )`,
+       AND appointment_time = ?`,
       [
         appointmentData.doctorId,
         appointmentData.appointmentDate,
         id,
-        appointmentData.appointmentTime,
-        appointmentData.duration
+        appointmentData.appointmentTime
       ]
     );
 
-    if (conflictResult.rows.length > 0) {
+    if (conflictResult.length > 0) {
       return res.status(409).json({
         error: 'Conflicto de horario',
         message: 'El doctor ya tiene una cita programada en ese horario'
@@ -505,13 +1043,14 @@ router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'
     }
 
     // Actualizar cita
-    const updatedAppointmentResult = await query(
+    const insuranceJson = appointmentData.insurance ? JSON.stringify(appointmentData.insurance) : null;
+    
+    await connection.execute(
       `UPDATE appointments SET
-        patient_id = $1, doctor_id = $2, appointment_date = $3, appointment_time = $4,
-        duration = $5, type = $6, status = $7, reason = $8, notes = $9, 
-        insurance = $10, specialty_id = $11, updated_at = NOW()
-      WHERE id = $12
-      RETURNING *`,
+        patient_id = ?, doctor_id = ?, appointment_date = ?, appointment_time = ?,
+        duration = ?, type = ?, modality = ?, status = ?, reason = ?, notes = ?, 
+        insurance = ?, specialty_id = ?, updated_at = NOW()
+      WHERE id = ?`,
       [
         appointmentData.patientId,
         appointmentData.doctorId,
@@ -519,20 +1058,27 @@ router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'
         appointmentData.appointmentTime,
         appointmentData.duration,
         appointmentData.type,
+        appointmentData.modality || 'PRESENCIAL',
         appointmentData.status,
         appointmentData.reason || null,
         appointmentData.notes || null,
-        appointmentData.insurance ? JSON.stringify(appointmentData.insurance) : null,
+        insuranceJson,
         appointmentData.specialtyId || null,
         id
       ]
     );
 
-    const updatedAppointment = updatedAppointmentResult.rows[0];
+    const [updatedAppointment] = await connection.execute(
+      'SELECT * FROM appointments WHERE id = ?',
+      [id]
+    );
 
     res.json({
       message: 'Cita actualizada exitosamente',
-      appointment: updatedAppointment
+      appointment: {
+        ...updatedAppointment[0],
+        insurance: typeof updatedAppointment[0].insurance === 'string' ? JSON.parse(updatedAppointment[0].insurance || '{}') : (updatedAppointment[0].insurance || {})
+      }
     });
 
   } catch (error) {
@@ -541,14 +1087,23 @@ router.put('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al actualizar la cita'
     });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
 // PATCH /api/appointments/:id/doctor - Actualizar solo el profesional asignado
 router.patch('/:id/doctor', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'), async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
+    const companyId = req.user?.companyId;
     const { error, value } = appointmentDoctorSchema.validate(req.body);
+    
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
+
     if (error) {
       return res.status(400).json({
         error: 'Datos de entrada inválidos',
@@ -557,34 +1112,48 @@ router.patch('/:id/doctor', authenticateToken, requirePermission('APPOINTMENTS',
     }
 
     const doctorId = value.doctorId;
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
 
     // Verificar existencia de la cita
-    const apptResult = await query('SELECT id, status FROM appointments WHERE id = $1', [id]);
-    if (apptResult.rows.length === 0) {
+    const [apptResult] = await connection.execute('SELECT id, status FROM appointments WHERE id = ?', [id]);
+    if (apptResult.length === 0) {
       return res.status(404).json({ error: 'Cita no encontrada', message: 'La cita no existe' });
     }
 
     // Verificar doctor válido y rol médico
-    const doctorResult = await query('SELECT id FROM users WHERE id = $1 AND role = $2', [doctorId, 'medical_user']);
-    if (doctorResult.rows.length === 0) {
+    const [doctorResult] = await connection.execute('SELECT id FROM users WHERE id = ? AND role = ?', [doctorId, 'medical_user']);
+    if (doctorResult.length === 0) {
       return res.status(404).json({ error: 'Doctor no encontrado', message: 'El profesional no existe o no es médico' });
     }
 
     // Actualizar doctor
-    const updated = await query('UPDATE appointments SET doctor_id = $1, updated_at = NOW() WHERE id = $2 RETURNING *', [doctorId, id]);
-    const appointment = updated.rows[0];
+    await connection.execute('UPDATE appointments SET doctor_id = ?, updated_at = NOW() WHERE id = ?', [doctorId, id]);
+    const [updated] = await connection.execute('SELECT * FROM appointments WHERE id = ?', [id]);
+    const appointment = updated[0];
+    
+    appointment.insurance = typeof appointment.insurance === 'string' ? JSON.parse(appointment.insurance || '{}') : (appointment.insurance || {});
+    
     return res.json({ message: 'Profesional actualizado', appointment });
   } catch (err) {
     console.error('Error actualizando doctor de cita:', err);
     return res.status(500).json({ error: 'Error interno del servidor', message: 'No se pudo actualizar el profesional' });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
 // PATCH /api/appointments/:id/status - Cambiar estado de la cita
 router.patch('/:id/status', authenticateToken, requirePermission('APPOINTMENTS', 'UPDATE'), async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
+    const companyId = req.user?.companyId;
     const { status } = req.body;
+
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
 
     // Validar estado
     const validStatuses = ['PROGRAMADA', 'CONFIRMADA', 'EN_PROGRESO', 'COMPLETADA', 'CANCELADA', 'NO_ASISTIO'];
@@ -595,13 +1164,16 @@ router.patch('/:id/status', authenticateToken, requirePermission('APPOINTMENTS',
       });
     }
 
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
+
     // Verificar si la cita existe
-    const existingAppointment = await query(
-      'SELECT id, status FROM appointments WHERE id = $1',
+    const [existingAppointment] = await connection.execute(
+      'SELECT id, status FROM appointments WHERE id = ?',
       [id]
     );
 
-    if (existingAppointment.rows.length === 0) {
+    if (existingAppointment.length === 0) {
       return res.status(404).json({
         error: 'Cita no encontrada',
         message: 'La cita con el ID especificado no existe'
@@ -609,16 +1181,22 @@ router.patch('/:id/status', authenticateToken, requirePermission('APPOINTMENTS',
     }
 
     // Actualizar estado
-    const updatedAppointmentResult = await query(
-      'UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+    await connection.execute(
+      'UPDATE appointments SET status = ?, updated_at = NOW() WHERE id = ?',
       [status, id]
     );
 
-    const updatedAppointment = updatedAppointmentResult.rows[0];
+    const [updatedAppointment] = await connection.execute(
+      'SELECT * FROM appointments WHERE id = ?',
+      [id]
+    );
+
+    const appointment = updatedAppointment[0];
+    appointment.insurance = typeof appointment.insurance === 'string' ? JSON.parse(appointment.insurance || '{}') : (appointment.insurance || {});
 
     res.json({
       message: 'Estado de cita actualizado exitosamente',
-      appointment: updatedAppointment
+      appointment
     });
 
   } catch (error) {
@@ -627,21 +1205,32 @@ router.patch('/:id/status', authenticateToken, requirePermission('APPOINTMENTS',
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al actualizar el estado de la cita'
     });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
 // DELETE /api/appointments/:id - Eliminar cita
 router.delete('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'DELETE'), async (req, res) => {
+  let connection = null;
   try {
     const { id } = req.params;
+    const companyId = req.user?.companyId;
+
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
+
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
 
     // Verificar si la cita existe
-    const existingAppointment = await query(
-      'SELECT id, status FROM appointments WHERE id = $1',
+    const [existingAppointment] = await connection.execute(
+      'SELECT id, status FROM appointments WHERE id = ?',
       [id]
     );
 
-    if (existingAppointment.rows.length === 0) {
+    if (existingAppointment.length === 0) {
       return res.status(404).json({
         error: 'Cita no encontrada',
         message: 'La cita con el ID especificado no existe'
@@ -649,7 +1238,7 @@ router.delete('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'DELE
     }
 
     // No permitir eliminar citas en progreso o completadas
-    if (existingAppointment.rows[0].status === 'EN_PROGRESO' || existingAppointment.rows[0].status === 'COMPLETADA') {
+    if (existingAppointment[0].status === 'EN_PROGRESO' || existingAppointment[0].status === 'COMPLETADA') {
       return res.status(400).json({
         error: 'Cita no eliminable',
         message: 'No se puede eliminar una cita en progreso o completada'
@@ -657,7 +1246,7 @@ router.delete('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'DELE
     }
 
     // Eliminar cita
-    await query('DELETE FROM appointments WHERE id = $1', [id]);
+    await connection.execute('DELETE FROM appointments WHERE id = ?', [id]);
 
     res.json({
       message: 'Cita eliminada exitosamente'
@@ -669,7 +1258,9 @@ router.delete('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'DELE
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al eliminar la cita'
     });
+  } finally {
+    if (connection) await connection.close();
   }
 });
 
-module.exports = router; 
+module.exports = router;

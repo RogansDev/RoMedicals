@@ -11,6 +11,9 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Configurar trust proxy para rate limiting detrás de proxy/load balancer
+app.set('trust proxy', 1);
+
 // Middleware de seguridad
 app.use(helmet());
 app.use(cors({
@@ -1584,7 +1587,7 @@ app.post('/api/ai/consultation/process-transcript', authenticateToken, requireRo
       return res.status(500).json({ message: 'Falta configurar DEEPSEEK_API_KEY en el servidor' });
     }
 
-    const { transcript, templateId, language = 'es', templateDef, patientSummary } = req.body || {};
+    const { transcript, templateId, language = 'es', templateDef, patientSummary, cie10Codes } = req.body || {};
     
     // Validaciones más estrictas
     if (!transcript || typeof transcript !== 'string' || transcript.trim().length === 0) {
@@ -1613,25 +1616,104 @@ Devuelve SOLO un JSON válido en UTF-8 sin texto adicional, siguiendo este esque
   "suggestions": { "<fieldId>": "texto profesional mejorado" },
   "analysis": "texto analítico clínico conciso",
   "rips": {
-    "diagnosticoPrincipal": "<descripcion> (<codigo>)",
-    "tipoDiagnostico": "Confirmado repetido|Presuntivo|...",
-    "finalidadProcedimiento": "Tratamiento|...",
-    "finalidadConsulta": "Tratamiento|Control|...",
-    "causaExterna": "Enfermedad general|...",
-    "diagnosticoComplicacion": "- o texto",
-    "diagnosticoSecundario": "- o texto",
-    "modalidadAtencion": "Intramural|...",
-    "tipoServicio": "Medicina general|...",
-    "grupoServicios": "Consulta externa|...",
-    "viaIngreso": "Derivado de consulta externa|..."
+    "diagnosticoPrincipal": "<codigo_cie10>",
+    "tipoDiagnostico": "impresion_diagnostica|confirmado_nuevo|confirmado_repetido",
+    "finalidadProcedimiento": "diagnostico|tratamiento|proteccion_especifica|deteccion_temprana_enfermedad_general|deteccion_temprana_enfermedad_laboral|valoracion_integral_promocion_mantenimiento|rehabilitacion|paliacion|planificacion_familiar_anticoncepcion|promocion_apoyo_lactancia_materna|atencion_basica_orientacion_familiar|atencion_cuidado_preconcepcional|atencion_cuidado_prenatal|interrupcion_voluntaria_embarazo|atencion_parto_puerperio|atencion_seguimiento_recien_nacido|preparacion_maternidad_paternidad|promocion_actividad_fisica|promocion_cesacion_tabaquismo|prevencion_consumo_sustancias_psicoactivas|promocion_alimentacion_saludable|promocion_derechos_sexuales_reproductivos|promocion_habilidades_para_la_vida|promocion_estrategias_afrontamiento|promocion_sana_convivencia_tejido_social|promocion_ambiente_seguro_cuidado|promocion_empoderamiento_derecho_salud|promocion_practicas_crianza_cuidado_salud|promocion_capacidad_agencia_cuidado_salud|desarrollo_habilidades_cognitivas|intervencion_colectiva|modificacion_estetica_corporal|otra",
+    "finalidadConsulta": "valoracion_integral_promocion_mantenimiento|deteccion_temprana_enfermedad_general|deteccion_temprana_enfermedad_laboral|diagnostico|tratamiento|rehabilitacion|paliacion|planificacion_familiar_anticoncepcion|promocion_apoyo_lactancia_materna|atencion_basica_orientacion_familiar|atencion_cuidado_preconcepcional|atencion_cuidado_prenatal|interrupcion_voluntaria_embarazo|atencion_parto_puerperio|atencion_seguimiento_recien_nacido|modificacion_estetica_corporal|otra",
+    "causaExterna": "accidente_trabajo|accidente_en_el_hogar|accidente_transito_origen_comun|accidente_transito_origen_laboral|accidente_entorno_educativo|otro_accidente|lesion_por_agresion|lesion_auto_infligida|sospecha_violencia_fisica|sospecha_violencia_psicologica|sospecha_violencia_sexual|sospecha_negligencia_abandono|ive_peligro_salud_vida|ive_malformacion_incompatible_vida|ive_violencia_sexual_incesto_inseminacion_no_consentida|evento_adverso_salud|enfermedad_general|enfermedad_laboral|promocion_mantenimiento_salud_intervenciones_individuales|intervencion_colectiva|atencion_poblacion_materno_perinatal|riesgo_ambiental|evento_catastrofico_origen_natural|otros_eventos_catastroficos|accidente_mina_antipersonal_map|accidente_artefacto_explosivo_improvisado_aei|accidente_municion_sin_explotar_muse|otra_victima_conflicto_armado_colombiano",
+    "diagnosticoComplicacion": "<codigo_cie10> o vacío",
+    "diagnosticoSecundario1": "<codigo_cie10> o vacío",
+    "diagnosticoSecundario2": "<codigo_cie10> o vacío",
+    "diagnosticoSecundario3": "<codigo_cie10> o vacío",
+    "modalidadAtencion": "telemedicina|presencial",
+    "ambitoAtencion": "consulta_general|internacion",
+    "tipoServicio": "medicina_general|medicina_interna",
+    "grupoServicios": "",
+    "viaIngreso": ""
   }
+}
+
+IMPORTANTE: 
+- Para diagnósticos (diagnosticoPrincipal, diagnosticoComplicacion, diagnosticoSecundario1-3): devuelve SOLO el código CIE-10 (ej: "A00.0", "I10", "E11.9"), NO la descripción.
+- Para todos los demás campos: usa EXACTAMENTE los valores en formato snake_case listados arriba.
+- Si no hay información suficiente para un campo, déjalo como string vacío "".
 }`;
+
+    // Preparar listado de códigos CIE-10 para el prompt
+    let cie10Prompt = '';
+    if (cie10Codes && Array.isArray(cie10Codes) && cie10Codes.length > 0) {
+      console.log(`📋 CIE-10 recibidos: ${cie10Codes.length} códigos`);
+      // Limitar a los primeros 2000 códigos para no exceder el límite del prompt
+      const limitedCodes = cie10Codes.slice(0, 2000);
+      
+      // Crear un índice de códigos por categoría para facilitar la búsqueda
+      const codesByCategory = {};
+      limitedCodes.forEach(c => {
+        const code = c.code || '';
+        const firstChar = code.charAt(0).toUpperCase();
+        if (!codesByCategory[firstChar]) codesByCategory[firstChar] = [];
+        codesByCategory[firstChar].push(c);
+      });
+      
+      cie10Prompt = `\n\n═══════════════════════════════════════════════════════════════════════════════
+LISTADO DE CÓDIGOS CIE-10 DISPONIBLES (${limitedCodes.length} códigos)
+═══════════════════════════════════════════════════════════════════════════════
+
+IMPORTANTE: DEBES BUSCAR EN ESTE LISTADO el código CIE-10 MÁS APROPIADO para cada diagnóstico.
+
+${limitedCodes.map(c => `${c.code}: ${c.description || c.name || ''}`).join('\n')}
+
+═══════════════════════════════════════════════════════════════════════════════
+INSTRUCCIONES OBLIGATORIAS PARA SELECCIONAR CÓDIGOS CIE-10:
+═══════════════════════════════════════════════════════════════════════════════
+
+1. LEE COMPLETAMENTE la transcripción y identifica TODOS los síntomas, signos y condiciones médicas mencionadas.
+
+2. PARA EL DIAGNÓSTICO PRINCIPAL (diagnosticoPrincipal) - ES OBLIGATORIO:
+   - Identifica el MOTIVO PRINCIPAL de consulta o la condición MÁS IMPORTANTE mencionada
+   - Busca en el listado anterior el código CIE-10 que MEJOR describa esa condición
+   - Ejemplos de búsqueda:
+     * Si menciona "alopecia areata" → busca "L63.9" (Alopecia areata, no especificada)
+     * Si menciona "dermatitis seborreica" → busca "L21.9" (Dermatitis seborreica, no especificada)
+     * Si menciona "dolor de cabeza" o "cefalea" → busca "R51" (Cefalea)
+     * Si menciona "fiebre" → busca "R50.9" (Fiebre no especificada)
+     * Si menciona "diabetes" → busca "E11.9" (Diabetes mellitus tipo 2)
+     * Si menciona "hipertensión" → busca "I10" (Hipertensión esencial)
+   - IMPORTANTE: Los códigos CIE-10 tienen formato con PUNTO: "L63.9" (NO "L639"), "L21.9" (NO "L219")
+   - USA EXACTAMENTE el código tal como aparece en el listado, CON EL PUNTO incluido (ej: "L63.9", "L21.9", "R51", "I10", "E11.9")
+   - NO dejes diagnosticoPrincipal vacío - SIEMPRE debe tener un código
+
+3. PARA DIAGNÓSTICOS SECUNDARIOS (diagnosticoSecundario1, diagnosticoSecundario2, diagnosticoSecundario3):
+   - Identifica condiciones ADICIONALES, comorbilidades o complicaciones mencionadas
+   - Busca códigos CIE-10 apropiados para cada una
+   - Solo incluye diagnósticos secundarios si realmente se mencionan en la transcripción
+   - Si no hay condiciones secundarias, deja estos campos vacíos ""
+
+4. PARA DIAGNÓSTICO DE COMPLICACIÓN (diagnosticoComplicacion):
+   - Solo incluye si se menciona explícitamente una complicación
+   - Si no hay complicaciones, deja vacío ""
+
+5. MÉTODO DE BÚSQUEDA:
+   - Lee la descripción de cada código en el listado
+   - Busca palabras clave de la transcripción en las descripciones
+   - Prioriza códigos más específicos sobre genéricos
+   - Si encuentras múltiples códigos relevantes, elige el más específico
+
+6. FORMATO: USA EXACTAMENTE el código tal como aparece en el listado (ej: "R51", "I10", "E11.9", "L21.9", "L63.9")
+   - Los códigos CIE-10 tienen formato: Letra + 2 dígitos + punto + 1-2 dígitos (ej: L63.9, L21.9, R51)
+   - NO agregues espacios, NO quites puntos, NO modifiques el formato
+   - Copia el código EXACTAMENTE como aparece en el listado
+   - Ejemplos correctos: "L63.9", "L21.9", "R51", "I10"
+   - Ejemplos INCORRECTOS: "L639", "L219", "L63 9", "L 21.9"`;
+    } else {
+      console.warn('⚠️ No se recibieron códigos CIE-10');
+    }
 
     // Incluir el templateId en el prompt para mapear por field.id cuando sea posible
     const userPrompt = `Idioma de trabajo: ${language}.
 Plantilla activa con id: ${templateId}.
 Definición de plantilla (JSON): ${templateDef ? JSON.stringify(templateDef).slice(0, 8000) : 'no provista'}
-Resumen del paciente: ${patientSummary ? JSON.stringify(patientSummary) : 'no provisto'}
+Resumen del paciente: ${patientSummary ? JSON.stringify(patientSummary) : 'no provisto'}${cie10Prompt}
 
 Transcripción literal de la entrevista médico-paciente (puede contener repeticiones, errores gramaticales, lenguaje coloquial):
 """
@@ -1652,9 +1734,51 @@ INSTRUCCIONES CRÍTICAS:
 5. Si la transcripción menciona información que no corresponde a ningún campo de la plantilla, simplemente no la incluyas en "suggestions".
 6. Usa la edad, antecedentes, alergias, condiciones y datos demográficos del paciente si están presentes para mejorar el análisis y el RIPS.
 
+7. ⚠️ CRÍTICO PARA RIPS - DEBES LLENAR TODOS LOS CAMPOS OBLIGATORIOS:
+   
+   A. DIAGNÓSTICO PRINCIPAL (diagnosticoPrincipal) - ES OBLIGATORIO Y NO PUEDE ESTAR VACÍO:
+      - Analiza la transcripción y identifica el MOTIVO PRINCIPAL de consulta
+      - Busca en el listado de códigos CIE-10 el código que MEJOR describa esa condición
+      - Ejemplos comunes:
+        * Dolor de cabeza/cefalea → "R51"
+        * Fiebre → "R50.9"
+        * Dolor abdominal → "R10.9"
+        * Tos → "R05"
+        * Diabetes → "E11.9"
+        * Hipertensión → "I10"
+      - SIEMPRE debe tener un código - NO dejes vacío
+   
+   B. DIAGNÓSTICOS SECUNDARIOS (diagnosticoSecundario1, diagnosticoSecundario2, diagnosticoSecundario3):
+      - Solo si se mencionan condiciones adicionales en la transcripción
+      - Busca códigos apropiados para cada condición adicional
+      - Si no hay condiciones secundarias, deja vacío ""
+   
+   C. DIAGNÓSTICO DE COMPLICACIÓN (diagnosticoComplicacion):
+      - Solo si se menciona explícitamente una complicación
+      - Si no hay, deja vacío ""
+   
+   D. USA EXACTAMENTE el código tal como aparece en el listado (ej: "R51", "I10", "E11.9")
+   - Para tipoDiagnostico: usa "impresion_diagnostica" si es una primera consulta, "confirmado_nuevo" si se confirma un diagnóstico nuevo, "confirmado_repetido" si es un control de diagnóstico conocido
+   - Para finalidadConsulta y finalidadProcedimiento: identifica el propósito principal de la consulta (tratamiento, diagnóstico, control, etc.) - NO dejes vacío
+   - Para causaExterna: identifica si es enfermedad general, accidente, violencia, etc. - NO dejes vacío
+   - Para modalidadAtencion: "presencial" por defecto, "telemedicina" si se menciona consulta virtual - NO dejes vacío
+   - Para ambitoAtencion: "consulta_general" por defecto, "internacion" si se menciona hospitalización - NO dejes vacío
+   - Para tipoServicio: "medicina_general" por defecto - NO dejes vacío
+   - Llena TODOS los campos RIPS que puedas inferir de la transcripción, especialmente diagnosticoPrincipal que es OBLIGATORIO
+
 EJEMPLO de mejora:
 - Transcripción: "el paciente dice que le duele la cabeza desde hace como 3 días y que toma paracetamol pero no le hace nada"
 - Sugerencia mejorada: "Paciente refiere cefalea de 3 días de evolución. Ha utilizado paracetamol sin mejoría sintomática."
+- RIPS sugerido: {
+    "diagnosticoPrincipal": "R51", // Cefalea
+    "tipoDiagnostico": "impresion_diagnostica",
+    "finalidadConsulta": "diagnostico",
+    "finalidadProcedimiento": "diagnostico",
+    "causaExterna": "enfermedad_general",
+    "modalidadAtencion": "presencial",
+    "ambitoAtencion": "consulta_general",
+    "tipoServicio": "medicina_general"
+  }
 `;
 
     // Llamada a DeepSeek Chat Completions (axios)
@@ -1665,6 +1789,8 @@ EJEMPLO de mejora:
       console.log('   - Transcript length:', transcript?.length || 0);
       console.log('   - Template ID:', templateId);
       console.log('   - Template fields:', templateDef?.fields?.length || 0);
+      console.log('   - CIE-10 codes:', cie10Codes?.length || 0);
+      console.log('   - Transcript preview:', transcript?.substring(0, 200));
       
       const resp = await axios.post('https://api.deepseek.com/chat/completions', {
         model: 'deepseek-chat',
@@ -1699,6 +1825,7 @@ EJEMPLO de mejora:
     try {
       parsed = JSON.parse(content);
       console.log('✅ JSON parseado correctamente');
+      console.log('📋 RIPS recibido de la IA:', JSON.stringify(parsed.rips || {}, null, 2));
     } catch (e) {
       console.error('❌ Error parseando JSON de DeepSeek:', e);
       console.error('   - Contenido recibido:', content?.substring(0, 500));
@@ -2202,6 +2329,21 @@ const initializeDatabase = async () => {
     process.exit(1);
   }
 };
+
+// ==================== REGISTRO DE RUTAS ====================
+
+// Registrar rutas de especialistas (MySQL)
+const specialistsRouter = require('./routes/specialists');
+const videosdkRouter = require('./routes/videosdk');
+app.use('/api/specialists', specialistsRouter);
+
+// Registrar rutas de citas (appointments)
+const appointmentsRouter = require('./routes/appointments');
+app.use('/api/appointments', appointmentsRouter);
+
+// Registrar rutas de VideoSDK
+app.use('/api/videosdk', videosdkRouter);
+console.log('✅ Ruta /api/videosdk registrada');
 
 // ==================== INICIO DEL SERVIDOR ====================
 

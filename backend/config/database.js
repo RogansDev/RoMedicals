@@ -23,7 +23,8 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   max: 20, // máximo número de conexiones en el pool
   idleTimeoutMillis: 30000, // tiempo máximo que una conexión puede estar inactiva
-  connectionTimeoutMillis: 2000, // tiempo máximo para establecer conexión
+  connectionTimeoutMillis: 5000, // tiempo máximo para establecer conexión (aumentado a 5 segundos)
+  query_timeout: 10000, // timeout para queries individuales
 });
 
 // Eventos del pool

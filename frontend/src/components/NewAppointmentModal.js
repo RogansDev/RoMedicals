@@ -16,7 +16,8 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
     specialtyId: '',
     date: '',
     time: '',
-    type: '',
+    type: 'CONSULTA',
+    modality: 'presencial',
     notes: '',
     status: ''
   });
@@ -30,14 +31,25 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   const [availableTimes, setAvailableTimes] = useState([]);
   const [loadingTimes, setLoadingTimes] = useState(false);
 
+  // Función auxiliar para obtener la fecha de hoy en formato YYYY-MM-DD (fecha local)
+  const getTodayLocal = () => {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
   // Cargar doctores y especialidades al abrir el modal
   useEffect(() => {
     if (isOpen) {
-      loadDoctors();
-      loadSpecialties();
-      // Establecer fecha por defecto como hoy
-      const today = new Date();
-      const formattedDate = today.toISOString().split('T')[0];
+      // Cargar especialidades primero para tener la lista completa
+      loadSpecialties().then(() => {
+        // Luego cargar doctores que pueden tener o no especialidad
+        loadDoctors();
+      });
+      // Establecer fecha por defecto como hoy (usando fecha local)
+      const formattedDate = getTodayLocal();
       setFormData(prev => ({ ...prev, date: formattedDate }));
     }
   }, [isOpen]);
@@ -47,40 +59,157 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
       // Preferir endpoint oficial de usuarios (axios) para doctores
       let doctorsList = [];
       try {
-        const { data } = await usersAPI.getDoctors();
-        doctorsList = Array.isArray(data?.doctors) ? data.doctors : (Array.isArray(data) ? data : []);
-      } catch (_) {
+        const doctorsResponse = await usersAPI.getDoctors();
+        console.log('Respuesta completa de getDoctors:', doctorsResponse);
+        console.log('doctorsResponse.data:', doctorsResponse?.data);
+        console.log('doctorsResponse.data?.doctors:', doctorsResponse?.data?.doctors);
+        
+        // Manejar diferentes formatos de respuesta (igual que UserManagement)
+        if (doctorsResponse?.data?.doctors) {
+          doctorsList = doctorsResponse.data.doctors;
+        } else if (Array.isArray(doctorsResponse?.data)) {
+          doctorsList = doctorsResponse.data;
+        } else if (doctorsResponse?.data) {
+          doctorsList = Array.isArray(doctorsResponse.data) ? doctorsResponse.data : [];
+        } else if (Array.isArray(doctorsResponse)) {
+          doctorsList = doctorsResponse;
+        }
+        
+        console.log('Doctores extraídos (antes de procesar):', doctorsList);
+      } catch (error) {
+        console.error('Error en getDoctors:', error);
         // Fallback al servicio legacy si el endpoint anterior falla
         const response = await userService.getDoctors();
         doctorsList = response.users || response.doctors || [];
       }
+      
+      // Normalizar y enriquecer datos de doctores
+      doctorsList = doctorsList.map(d => {
+        // Extraer nombre completo
+        const firstName = d.first_name || d.firstName || '';
+        const lastName = d.last_name || d.lastName || '';
+        const fullName = `${firstName} ${lastName}`.trim();
+        const name = d.name || d.fullName || fullName || 'Sin nombre';
+        
+        // Extraer specialty_id (puede venir como número, string, o null)
+        const specialtyId = d.specialty_id || d.specialtyId || null;
+        const specialtyName = d.specialty_name || d.specialty || '';
+        
+        return {
+          ...d,
+          id: d.id,
+          first_name: firstName,
+          last_name: lastName,
+          firstName: firstName,
+          lastName: lastName,
+          name: name,
+          fullName: fullName,
+          specialty_id: specialtyId ? String(specialtyId) : null,
+          specialtyId: specialtyId ? String(specialtyId) : null,
+          specialty_name: specialtyName,
+          specialty: specialtyName
+        };
+      });
+      
       setDoctors(doctorsList);
       
-      // Extraer especialidades únicas (id, name)
-      const specialtyMap = new Map();
+      // Extraer especialidades únicas (id, name) desde doctores
+      const specialtyMap = new Map(); // Map<id, name>
+      const specialtyNameMap = new Map(); // Map<name, id> - para especialidades sin ID
+      let tempIdCounter = 10000; // Contador para IDs temporales
+      
       doctorsList.forEach(d => {
         const id = d.specialty_id || d.specialtyId;
-        const name = d.specialty_name || d.specialty || '';
-        if (id && name && !specialtyMap.has(id)) specialtyMap.set(id, name);
+        const name = (d.specialty_name || d.specialty || '').trim();
+        
+        if (name) {
+          // Si tiene ID, usar el ID
+          if (id) {
+            const idStr = String(id);
+            if (!specialtyMap.has(idStr)) {
+              specialtyMap.set(idStr, name);
+            }
+          } else {
+            // Si no tiene ID pero tiene nombre, crear un ID temporal basado en el nombre
+            // Primero verificar si ya existe una especialidad con ese nombre
+            if (!specialtyNameMap.has(name)) {
+              // Buscar si ya existe en las especialidades cargadas de la API
+              const existingSpec = specialties.find(s => s.name === name);
+              if (existingSpec) {
+                // Usar el ID existente
+                specialtyMap.set(String(existingSpec.id), name);
+                specialtyNameMap.set(name, String(existingSpec.id));
+              } else {
+                // Crear ID temporal único basado en el nombre
+                const tempId = `temp_${tempIdCounter++}`;
+                specialtyMap.set(tempId, name);
+                specialtyNameMap.set(name, tempId);
+              }
+            }
+          }
+        }
       });
-      if (specialties.length === 0) {
-        setSpecialties(Array.from(specialtyMap.entries()).map(([id, name]) => ({ id, name })));
-      }
+      
+      console.log('Especialidades extraídas de doctores:', Array.from(specialtyMap.entries()));
+      
+      // Agregar especialidades de doctores a las existentes (si no están ya)
+      setSpecialties(prev => {
+        const combined = new Map();
+        
+        // Primero agregar las existentes (de la API)
+        prev.forEach(spec => {
+          combined.set(String(spec.id), spec.name);
+        });
+        
+        // Luego agregar las de los doctores (pueden tener nombres más actualizados o nuevas)
+        specialtyMap.forEach((name, id) => {
+          // Verificar si ya existe una especialidad con el mismo nombre pero diferente ID
+          const existingByName = Array.from(combined.entries()).find(([_, n]) => n === name);
+          if (existingByName) {
+            // Ya existe, no agregar duplicado
+            return;
+          }
+          // Verificar si ya existe con el mismo ID
+          if (!combined.has(String(id))) {
+            combined.set(String(id), name);
+          }
+        });
+        
+        const result = Array.from(combined.entries()).map(([id, name]) => ({ id, name }));
+        console.log('Especialidades combinadas (API + doctores):', result);
+        return result;
+      });
+      
+      // Debug: Log para verificar datos
+      console.log('Doctores cargados (raw):', doctorsList);
+      console.log('Doctores procesados:', doctorsList.map(d => ({
+        id: d.id,
+        name: d.name,
+        first_name: d.first_name,
+        last_name: d.last_name,
+        specialty_id: d.specialty_id,
+        specialtyId: d.specialtyId,
+        specialty_name: d.specialty_name,
+        specialty: d.specialty,
+        // Mostrar todos los campos disponibles para debug
+        allFields: Object.keys(d)
+      })));
+      console.log('Especialidades disponibles desde doctores:', Array.from(specialtyMap.entries()));
     } catch (error) {
       console.error('Error cargando doctores:', error);
       // Usar datos mock como fallback
       setDoctors([
-        { id: 1, name: 'Dr. Ana María López', specialty: 'Medicina General' },
-        { id: 2, name: 'Dr. Carlos Rodríguez', specialty: 'Cardiología' },
-        { id: 3, name: 'Dr. Laura Martínez', specialty: 'Dermatología' },
-        { id: 4, name: 'Dr. Pedro Silva', specialty: 'Pediatría' }
+        { id: 1, name: 'Dr. Ana María López', specialty: 'Medicina General', specialty_id: '1', specialtyId: '1' },
+        { id: 2, name: 'Dr. Carlos Rodríguez', specialty: 'Cardiología', specialty_id: '2', specialtyId: '2' },
+        { id: 3, name: 'Dr. Laura Martínez', specialty: 'Dermatología', specialty_id: '3', specialtyId: '3' },
+        { id: 4, name: 'Dr. Pedro Silva', specialty: 'Pediatría', specialty_id: '4', specialtyId: '4' }
       ]);
       if (specialties.length === 0) {
         setSpecialties([
-          { id: 1, name: 'Medicina General' },
-          { id: 2, name: 'Cardiología' },
-          { id: 3, name: 'Dermatología' },
-          { id: 4, name: 'Pediatría' }
+          { id: '1', name: 'Medicina General' },
+          { id: '2', name: 'Cardiología' },
+          { id: '3', name: 'Dermatología' },
+          { id: '4', name: 'Pediatría' }
         ]);
       }
     }
@@ -89,20 +218,26 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   const loadSpecialties = async () => {
     try {
       const resp = await specialtiesAPI.getAll();
-      const list = (resp.data?.specialties || resp.data || resp.specialties || [])
-        .map(s => ({ id: s.id, name: s.name }));
-      if (list.length) setSpecialties(list);
+      const apiSpecialties = (resp.data?.specialties || resp.data || resp.specialties || [])
+        .map(s => ({ id: String(s.id), name: s.name }));
+      
+      if (apiSpecialties.length > 0) {
+        // Establecer especialidades desde la API (fuente principal)
+        setSpecialties(apiSpecialties);
+        console.log('Especialidades cargadas desde API:', apiSpecialties);
+      } else {
+        console.warn('No se encontraron especialidades en la API');
+      }
     } catch (error) {
+      console.error('Error cargando especialidades desde API:', error);
       // Silencioso: se usará fallback desde doctores
       console.warn('No se pudieron cargar especialidades desde API, usando fallback');
     }
   };
 
-  const appointmentTypes = [
-    { value: 'primera vez', label: 'Primera vez' },
-    { value: 'control', label: 'Control' },
-    { value: 'consulta', label: 'Consulta' },
-    { value: 'emergencia', label: 'Emergencia' }
+  const modalityOptions = [
+    { value: 'telemedicina', label: 'Telemedicina' },
+    { value: 'presencial', label: 'Presencial' }
   ];
 
   const statusOptions = [
@@ -215,9 +350,8 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
 
   useEffect(() => {
     if (isOpen) {
-      // Establecer fecha por defecto como hoy
-      const today = new Date();
-      const formattedDate = today.toISOString().split('T')[0];
+      // Establecer fecha por defecto como hoy (usando fecha local)
+      const formattedDate = getTodayLocal();
       setFormData(prev => ({ ...prev, date: formattedDate }));
     }
   }, [isOpen]);
@@ -252,12 +386,34 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
         return {
           id,
           name,
+          firstName,
+          lastName,
           document: `${idType} ${idNumber}`.trim(),
+          idNumber,
           phone
         };
       });
       
-      setPatientSearchResults(formattedPatients);
+      // Filtrar resultados para mostrar solo los que realmente coinciden con el término de búsqueda
+      const searchTermLower = searchTerm.toLowerCase().trim();
+      const filteredPatients = formattedPatients.filter(patient => {
+        // Verificar si el término está al inicio del nombre o apellido
+        const firstNameMatch = patient.firstName?.toLowerCase().startsWith(searchTermLower) || false;
+        const lastNameMatch = patient.lastName?.toLowerCase().startsWith(searchTermLower) || false;
+        const fullNameMatch = patient.name?.toLowerCase().startsWith(searchTermLower) || false;
+        
+        // Verificar si el término está en el número de documento
+        const documentMatch = patient.idNumber?.toLowerCase().includes(searchTermLower) || false;
+        
+        // Verificar si alguna palabra del nombre completo comienza con el término (para casos como "María José" cuando se busca "ma")
+        const nameWords = patient.name?.toLowerCase().split(/\s+/) || [];
+        const wordMatch = nameWords.some(word => word.startsWith(searchTermLower));
+        
+        // Solo incluir si coincide al inicio del nombre/apellido, en el documento, o si alguna palabra del nombre comienza con el término
+        return firstNameMatch || lastNameMatch || fullNameMatch || documentMatch || wordMatch;
+      });
+      
+      setPatientSearchResults(filteredPatients);
     } catch (error) {
       console.error('Error buscando pacientes:', error);
       toast.error('No se pudo buscar pacientes. Intenta de nuevo o crea el paciente primero.');
@@ -281,21 +437,85 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   const handleDoctorChange = (e) => {
     const doctorId = e.target.value;
     const selectedDoctor = doctors.find(d => String(d.id) === String(doctorId));
-    const selSpecId = selectedDoctor ? (selectedDoctor.specialty_id || selectedDoctor.specialtyId || '') : '';
-    const selSpecName = selectedDoctor ? (selectedDoctor.specialty || selectedDoctor.specialty_name || '') : '';
-
-    // Asegurar que la especialidad del médico esté presente en el selector
-    if (selSpecId && selSpecName && !specialties.find(s => String(s.id) === String(selSpecId))) {
-      setSpecialties(prev => ([...prev, { id: selSpecId, name: selSpecName }]));
+    
+    if (!selectedDoctor) {
+      // Si no hay doctor seleccionado, limpiar solo el doctor
+      setFormData(prev => ({
+        ...prev,
+        doctorId: '',
+        doctorName: ''
+      }));
+      return;
     }
+    
+    const selSpecId = selectedDoctor.specialty_id || selectedDoctor.specialtyId || '';
+    const selSpecName = (selectedDoctor.specialty || selectedDoctor.specialty_name || '').trim();
+    
+    // Buscar la especialidad en la lista (por ID o por nombre)
+    let foundSpecialty = null;
+    if (selSpecId) {
+      foundSpecialty = specialties.find(s => String(s.id) === String(selSpecId));
+    }
+    
+    // Si no se encontró por ID, buscar por nombre
+    if (!foundSpecialty && selSpecName) {
+      foundSpecialty = specialties.find(s => 
+        s.name.toLowerCase() === selSpecName.toLowerCase()
+      );
+    }
+    
+    // Si no existe la especialidad en la lista, agregarla
+    if (!foundSpecialty && selSpecName) {
+      // Crear un ID temporal si no hay ID
+      const newSpecId = selSpecId || `temp_${Date.now()}`;
+      const newSpecialty = { id: newSpecId, name: selSpecName };
+      setSpecialties(prev => {
+        // Verificar que no exista ya por nombre
+        const existsByName = prev.find(s => 
+          s.name.toLowerCase() === selSpecName.toLowerCase()
+        );
+        if (existsByName) {
+          foundSpecialty = existsByName;
+          return prev;
+        }
+        return [...prev, newSpecialty];
+      });
+      foundSpecialty = { id: newSpecId, name: selSpecName };
+    }
+    
+    // Función helper para obtener el nombre del doctor
+    const getDoctorName = (doc) => {
+      if (!doc) return '';
+      if (doc.name) return doc.name;
+      if (doc.fullName) return doc.fullName;
+      const firstName = doc.first_name || doc.firstName || '';
+      const lastName = doc.last_name || doc.lastName || '';
+      const fullName = `${firstName} ${lastName}`.trim();
+      return fullName || 'Sin nombre';
+    };
 
-    setFormData(prev => ({
-      ...prev,
-      doctorId: doctorId,
-      doctorName: selectedDoctor ? (selectedDoctor.name || `${selectedDoctor.first_name || ''} ${selectedDoctor.last_name || ''}`.trim()) : '',
-      specialty: selSpecName || '',
-      specialtyId: selSpecId || ''
-    }));
+    // Actualizar el formulario
+    // IMPORTANTE: Solo actualizar la especialidad si el doctor tiene una
+    // Si el doctor no tiene especialidad, mantener la especialidad ya seleccionada
+    setFormData(prev => {
+      const updates = {
+        doctorId: doctorId,
+        doctorName: getDoctorName(selectedDoctor)
+      };
+      
+      // Solo actualizar especialidad si el doctor tiene una
+      if (foundSpecialty) {
+        updates.specialty = foundSpecialty.name;
+        updates.specialtyId = foundSpecialty.id;
+      } else if (selSpecName) {
+        // Si tiene nombre pero no se encontró, usar el nombre directamente
+        updates.specialty = selSpecName;
+        updates.specialtyId = selSpecId || `temp_${Date.now()}`;
+      }
+      // Si no tiene especialidad, NO actualizar specialty ni specialtyId (mantener los valores actuales)
+      
+      return { ...prev, ...updates };
+    });
 
     // Cargar horario del médico y recomputar horas disponibles
     (async () => {
@@ -323,14 +543,30 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
   };
 
   const handleSpecialtyChange = (e) => {
-    const selectedId = e.target.value || '';
-    const selectedSpec = specialties.find(s => String(s.id) === String(selectedId));
-    // Si el médico seleccionado no pertenece a la especialidad escogida, NO limpiar de inmediato; permitir que el usuario cambie luego
+    const selectedId = String(e.target.value || '');
+    const selectedSpec = specialties.find(s => String(s.id) === selectedId);
+    
+    // Verificar si el doctor actual pertenece a la especialidad seleccionada
+    const currentDoctor = doctors.find(d => String(d.id) === String(formData.doctorId));
+    const doctorSpecialtyId = currentDoctor ? String(currentDoctor.specialty_id || currentDoctor.specialtyId || '') : '';
+    const shouldClearDoctor = selectedId && doctorSpecialtyId && doctorSpecialtyId !== selectedId;
+    
     setFormData(prev => ({
       ...prev,
       specialtyId: selectedId,
       specialty: selectedSpec ? selectedSpec.name : '',
+      // Limpiar doctor si no pertenece a la especialidad seleccionada
+      ...(shouldClearDoctor ? {
+        doctorId: '',
+        doctorName: ''
+      } : {})
     }));
+    
+    // Si se limpió el doctor, también limpiar horario y horas disponibles
+    if (shouldClearDoctor) {
+      setDoctorSchedule(null);
+      setAvailableTimes([]);
+    }
   };
 
   // Recalcular horas cuando cambie fecha si ya hay médico y horario
@@ -374,18 +610,32 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
     
     try {
       // Preparar datos para el backend
+      // Asegurar que modality esté en mayúsculas y sea válido
+      const modalityValue = (formData.modality || 'presencial').toLowerCase();
+      const normalizedModality = modalityValue === 'telemedicina' ? 'TELEMEDICINA' : 'PRESENCIAL';
+      
+      console.log('📋 Datos de la cita antes de enviar:', {
+        modality: formData.modality,
+        normalizedModality,
+        type: formData.type,
+        allFormData: formData
+      });
+      
       const appointmentData = {
         patientId: formData.patientId,
         doctorId: formData.doctorId,
         appointmentDate: formData.date,
         appointmentTime: formData.time,
         duration: 30, // Duración por defecto en minutos
-        type: formData.type.toUpperCase(),
+        type: (formData.type || 'CONSULTA').toUpperCase(),
+        modality: normalizedModality,
         status: formData.status.toUpperCase(),
         specialtyId: formData.specialtyId || null,
         reason: formData.notes || '',
         notes: formData.notes || ''
       };
+      
+      console.log('📤 Enviando datos de la cita:', appointmentData);
       
       // Llamar a la función onSave del componente padre y esperar resultado
       await onSave(appointmentData);
@@ -412,7 +662,8 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
       specialtyId: '',
       date: '',
       time: '',
-      type: '',
+      type: 'CONSULTA',
+      modality: 'presencial',
       notes: '',
       status: ''
     });
@@ -468,28 +719,28 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
                         <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-600"></div>
                       </div>
                     )}
+                    
+                    {/* Resultados de búsqueda - Dropdown superpuesto */}
+                    {patientSearchResults.length > 0 && (
+                      <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                        {patientSearchResults.map(patient => (
+                          <div
+                            key={patient.id}
+                            className="p-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-b-0"
+                            onClick={() => selectPatient(patient)}
+                          >
+                            <div className="font-medium text-gray-900">{patient.name}</div>
+                            <div className="text-sm text-gray-600">
+                              {patient.document} • {patient.phone}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <p className="text-xs text-gray-500 mt-1">
                     💡 Puedes buscar un paciente existente o crear uno nuevo completando los campos manualmente
                   </p>
-                  
-                  {/* Resultados de búsqueda */}
-                  {patientSearchResults.length > 0 && (
-                    <div className="mt-2 border border-gray-200 rounded-lg max-h-40 overflow-y-auto">
-                      {patientSearchResults.map(patient => (
-                        <div
-                          key={patient.id}
-                          className="p-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-b-0"
-                          onClick={() => selectPatient(patient)}
-                        >
-                          <div className="font-medium text-gray-900">{patient.name}</div>
-                          <div className="text-sm text-gray-600">
-                            {patient.document} • {patient.phone}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -549,18 +800,141 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
                     className="input-field"
                     value={formData.doctorId}
                     onChange={handleDoctorChange}
+                    disabled={formData.specialtyId && (() => {
+                      const selectedSpecialtyId = String(formData.specialtyId || '');
+                      const selectedSpecialty = specialties.find(s => String(s.id) === selectedSpecialtyId);
+                      const selectedSpecialtyName = selectedSpecialty ? selectedSpecialty.name : '';
+                      
+                      const matchingDoctors = doctors.filter(d => {
+                        const docSpecialtyId = String(d.specialty_id || d.specialtyId || '');
+                        const docSpecialtyName = String(d.specialty_name || d.specialty || '').trim();
+                        
+                        // Comparar por ID si ambos tienen ID
+                        if (docSpecialtyId && selectedSpecialtyId && docSpecialtyId !== '') {
+                          return docSpecialtyId === selectedSpecialtyId;
+                        }
+                        
+                        // Si no hay ID, comparar por nombre
+                        if (docSpecialtyName && selectedSpecialtyName) {
+                          return docSpecialtyName.toLowerCase() === selectedSpecialtyName.toLowerCase();
+                        }
+                        
+                        return false;
+                      });
+                      
+                      return matchingDoctors.length === 0;
+                    })()}
                   >
-                    <option value="">Seleccionar doctor</option>
+                    <option value="">
+                      {formData.specialtyId 
+                        ? (() => {
+                            const selectedSpecialtyId = String(formData.specialtyId || '');
+                            const selectedSpecialty = specialties.find(s => String(s.id) === selectedSpecialtyId);
+                            const selectedSpecialtyName = selectedSpecialty ? selectedSpecialty.name : '';
+                            
+                            const matchingDoctors = doctors.filter(d => {
+                              const docSpecialtyId = String(d.specialty_id || d.specialtyId || '');
+                              const docSpecialtyName = String(d.specialty_name || d.specialty || '').trim();
+                              
+                              // Comparar por ID si ambos tienen ID
+                              if (docSpecialtyId && selectedSpecialtyId && docSpecialtyId !== '') {
+                                return docSpecialtyId === selectedSpecialtyId;
+                              }
+                              
+                              // Si no hay ID, comparar por nombre
+                              if (docSpecialtyName && selectedSpecialtyName) {
+                                return docSpecialtyName.toLowerCase() === selectedSpecialtyName.toLowerCase();
+                              }
+                              
+                              return false;
+                            });
+                            
+                            return matchingDoctors.length === 0
+                              ? 'No hay doctores disponibles para esta especialidad'
+                              : 'Seleccionar doctor';
+                          })()
+                        : 'Seleccionar doctor'}
+                    </option>
                     {(
                       formData.specialtyId
-                        ? doctors.filter(d => String(d.specialty_id || d.specialtyId) === String(formData.specialtyId))
+                        ? doctors.filter(d => {
+                            const docSpecialtyId = String(d.specialty_id || d.specialtyId || '');
+                            const docSpecialtyName = String(d.specialty_name || d.specialty || '').trim();
+                            const selectedSpecialtyId = String(formData.specialtyId || '');
+                            const selectedSpecialty = specialties.find(s => String(s.id) === selectedSpecialtyId);
+                            const selectedSpecialtyName = selectedSpecialty ? selectedSpecialty.name : '';
+                            
+                            // Comparar por ID si ambos tienen ID
+                            if (docSpecialtyId && selectedSpecialtyId && docSpecialtyId !== '') {
+                              return docSpecialtyId === selectedSpecialtyId;
+                            }
+                            
+                            // Si no hay ID, comparar por nombre
+                            if (docSpecialtyName && selectedSpecialtyName) {
+                              return docSpecialtyName.toLowerCase() === selectedSpecialtyName.toLowerCase();
+                            }
+                            
+                            return false;
+                          })
                         : doctors
-                    ).map(doctor => (
-                      <option key={doctor.id} value={doctor.id}>
-                        {(doctor.name || `${doctor.first_name} ${doctor.last_name}`)} - {(doctor.specialty || doctor.specialty_name || '')}
-                      </option>
-                    ))}
+                    ).map(doctor => {
+                      // Función helper para obtener el nombre del doctor
+                      const getDoctorName = (doc) => {
+                        if (doc.name) return doc.name;
+                        if (doc.fullName) return doc.fullName;
+                        const firstName = doc.first_name || doc.firstName || '';
+                        const lastName = doc.last_name || doc.lastName || '';
+                        const fullName = `${firstName} ${lastName}`.trim();
+                        return fullName || 'Sin nombre';
+                      };
+                      
+                      // Función helper para obtener la especialidad
+                      const getSpecialty = (doc) => {
+                        return doc.specialty_name || doc.specialty || '';
+                      };
+                      
+                      const doctorName = getDoctorName(doctor);
+                      const specialty = getSpecialty(doctor);
+                      
+                      return (
+                        <option key={doctor.id} value={doctor.id}>
+                          {doctorName} {specialty ? `- ${specialty}` : ''}
+                        </option>
+                      );
+                    })}
                   </select>
+                  {formData.specialtyId && (() => {
+                    const selectedSpecialtyId = String(formData.specialtyId || '');
+                    const selectedSpecialty = specialties.find(s => String(s.id) === selectedSpecialtyId);
+                    const selectedSpecialtyName = selectedSpecialty ? selectedSpecialty.name : '';
+                    
+                    const matchingDoctors = doctors.filter(d => {
+                      const docSpecialtyId = String(d.specialty_id || d.specialtyId || '');
+                      const docSpecialtyName = String(d.specialty_name || d.specialty || '').trim();
+                      
+                      // Comparar por ID si ambos tienen ID
+                      if (docSpecialtyId && selectedSpecialtyId && docSpecialtyId !== '') {
+                        return docSpecialtyId === selectedSpecialtyId;
+                      }
+                      
+                      // Si no hay ID, comparar por nombre
+                      if (docSpecialtyName && selectedSpecialtyName) {
+                        return docSpecialtyName.toLowerCase() === selectedSpecialtyName.toLowerCase();
+                      }
+                      
+                      return false;
+                    });
+                    
+                    return matchingDoctors.length === 0 ? (
+                      <p className="text-xs text-amber-600 mt-1">
+                        ⚠️ No hay doctores disponibles para la especialidad seleccionada. Por favor, selecciona otra especialidad.
+                      </p>
+                    ) : (
+                      <p className="text-xs text-gray-500 mt-1">
+                        💡 Se muestran solo los doctores de la especialidad seleccionada
+                      </p>
+                    );
+                  })()}
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -572,7 +946,7 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
                       className="input-field"
                       value={formData.date}
                       onChange={handleInputChange}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={getTodayLocal()}
                     />
                     {formData.doctorId && doctorSchedule && formData.date && !doctorSchedule?.[getDayKeyFromDate(formData.date)]?.isWorking && (
                       <p className="text-xs text-red-600 mt-1">El médico no atiende este día. Seleccione otra fecha.</p>
@@ -605,19 +979,34 @@ const NewAppointmentModal = ({ isOpen, onClose, onSave }) => {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="form-label">Tipo de Atención *</label>
+                    <label className="form-label">Modalidad *</label>
+                    <select
+                      name="modality"
+                      className="input-field"
+                      value={formData.modality || ''}
+                      onChange={handleInputChange}
+                    >
+                      <option value="">Seleccionar modalidad</option>
+                      {modalityOptions.map(modality => (
+                        <option key={modality.value} value={modality.value}>
+                          {modality.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="form-label">Tipo de consulta *</label>
                     <select
                       name="type"
                       className="input-field"
-                      value={formData.type}
+                      value={formData.type || 'CONSULTA'}
                       onChange={handleInputChange}
                     >
-                      <option value="">Seleccionar tipo</option>
-                      {appointmentTypes.map(type => (
-                        <option key={type.value} value={type.value}>
-                          {type.label}
-                        </option>
-                      ))}
+                      <option value="CONSULTA">Consulta</option>
+                      <option value="CONTROL">Control</option>
+                      <option value="URGENCIA">Urgencia</option>
+                      <option value="PROCEDIMIENTO">Procedimiento</option>
+                      <option value="OTRO">Otro</option>
                     </select>
                   </div>
                   <div>

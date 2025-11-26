@@ -61,23 +61,39 @@ api.interceptors.response.use(
     // Manejar errores de autenticación (401) y autorización (403)
     const isAuthError = error.response?.status === 401 || error.response?.status === 403;
     const isLoginEndpoint = error.config?.url?.includes('/auth/login');
+    const is404Error = error.response?.status === 404;
+    const isVideosdkEndpoint = error.config?.url?.includes('/videosdk');
     
-    if (isAuthError && !isLoginEndpoint) {
-      // Token expirado, inválido o sin permisos
-      console.error('Error de autenticación:', error.response?.data);
-      const tokenKey = config.AUTH_TOKEN_KEY || 'authToken';
-      localStorage.removeItem(tokenKey);
-      localStorage.removeItem(config.USER_DATA_KEY || 'user');
+    // No cerrar sesión por errores 404 (recurso no encontrado es normal)
+    // No cerrar sesión por errores de VideoSDK (son errores de servicio externo, no de autenticación)
+    // Solo cerrar sesión por errores de autenticación/autorización reales
+    if (isAuthError && !isLoginEndpoint && !is404Error && !isVideosdkEndpoint) {
+      // Verificar si el error es realmente de autenticación o solo de permisos
+      const errorMessage = error.response?.data?.message || error.response?.data?.error || '';
+      const isPermissionError = errorMessage.toLowerCase().includes('permiso') || 
+                                errorMessage.toLowerCase().includes('acceso denegado') ||
+                                errorMessage.toLowerCase().includes('insuficiente');
       
-      // Si es 403 (Token inválido), también redirigir al login
-      if (error.response?.status === 403) {
-        // Mostrar mensaje específico
-        if (error.response?.data?.message) {
-          console.error('Mensaje del servidor:', error.response.data.message);
+      // Si es un error de permisos (403) pero no de autenticación, no cerrar sesión
+      // Solo cerrar sesión si es realmente un problema de token (401) o token inválido
+      if (error.response?.status === 401 || 
+          (error.response?.status === 403 && !isPermissionError && errorMessage.toLowerCase().includes('token'))) {
+        // Token expirado, inválido o sin permisos
+        console.error('Error de autenticación:', error.response?.data);
+        const tokenKey = config.AUTH_TOKEN_KEY || 'authToken';
+        localStorage.removeItem(tokenKey);
+        localStorage.removeItem(config.USER_DATA_KEY || 'user');
+        
+        // Si es 403 (Token inválido), también redirigir al login
+        if (error.response?.status === 403) {
+          // Mostrar mensaje específico
+          if (error.response?.data?.message) {
+            console.error('Mensaje del servidor:', error.response.data.message);
+          }
         }
+        
+        window.location.href = config.ROUTES.LOGIN || '/login';
       }
-      
-      window.location.href = config.ROUTES.LOGIN || '/login';
     }
     return Promise.reject(error);
   }
@@ -201,8 +217,14 @@ export const specialistsAPI = {
   delete: (id) => api.delete(`/specialists/${id}`),
   updateStatus: (id, status) => api.patch(`/specialists/${id}/status`, { status }),
   resetPassword: (id) => api.post(`/specialists/${id}/reset-password`),
-  updateSchedule: (id, schedule) => api.put(`/specialists/${id}/schedule`, { schedule }),
-  getSchedule: (id) => api.get(`/specialists/${id}/schedule`)
+  updateSchedule: (id, schedule, options = {}) => api.put(`/specialists/${id}/schedule`, { schedule }, { 
+    timeout: options.timeout || 30000, // 30 segundos por defecto para esta petición
+    ...options 
+  }),
+  getSchedule: (id, options = {}) => api.get(`/specialists/${id}/schedule`, { 
+    timeout: options.timeout || 30000, // 30 segundos por defecto para esta petición
+    ...options 
+  })
 };
 
 // Funciones de diagnósticos

@@ -419,7 +419,8 @@ code {
   position: sticky;
   top: 0;
   z-index: 30;
-  margin-bottom: 2rem;
+  margin: 0;
+  width: 100%;
 }
 
 .header-content {
@@ -427,7 +428,7 @@ code {
   align-items: center;
   justify-content: space-between;
   padding: 1rem 2rem;
-  max-width: 1400px;
+  width: 100%;
   margin: 0 auto;
 }
 
@@ -445,10 +446,13 @@ code {
 }
 
 .main-content {
-  margin-left: 280px;
-  padding: 2rem;
-  max-width: 1400px;
-  margin: 0 auto;
+  margin-left: 0;
+  padding-left: 280px;
+  width: 100%;
+}
+
+.main-content > main {
+  padding: 0 2rem 2rem 2rem;
 }
 
 /* Estilos para el dashboard */
@@ -804,7 +808,11 @@ code {
   
   .main-content {
     margin-left: 0;
-    padding: 1rem;
+    padding-left: 0;
+  }
+  
+  .main-content > main {
+    padding: 0 1rem 1rem 1rem;
   }
   
   .dashboard-stats {
@@ -822,11 +830,11 @@ code {
 }
 
 .main-content.sidebar-closed {
-  margin-left: 0;
+  padding-left: 0;
 }
 
 .main-content.sidebar-open {
-  margin-left: 280px;
+  padding-left: 280px;
 }
 
 /* Transiciones suaves */
@@ -835,7 +843,7 @@ code {
 }
 
 .main-content {
-  transition: margin-left 0.3s ease-in-out;
+  transition: padding-left 0.3s ease-in-out;
 }
 
 @media (max-width: 768px) {
