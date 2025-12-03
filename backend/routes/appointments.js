@@ -1,7 +1,7 @@
 const express = require('express');
 const Joi = require('joi');
 const mysql = require('mysql2/promise');
-const { authenticateToken, requirePermission } = require('../middleware/auth');
+const { authenticateToken, authenticateTokenOrApiKey, requirePermission } = require('../middleware/auth');
 const { v4: uuidv4 } = require('uuid');
 
 const router = express.Router();
@@ -553,7 +553,8 @@ const appointmentDoctorSchema = Joi.object({
 });
 
 // GET /api/appointments - Listar citas con filtros
-router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), async (req, res) => {
+// GET /api/appointments - Listar citas (acepta JWT o API Key)
+router.get('/', authenticateTokenOrApiKey, async (req, res) => {
   let connection = null;
   try {
     const companyId = req.user?.companyId;
@@ -758,7 +759,8 @@ router.get('/', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), as
 });
 
 // GET /api/appointments/:id - Obtener cita específica
-router.get('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'READ'), async (req, res) => {
+// GET /api/appointments/:id - Obtener cita por ID (acepta JWT o API Key)
+router.get('/:id', authenticateTokenOrApiKey, async (req, res) => {
   let connection = null;
   try {
     const { id } = req.params;
@@ -1257,6 +1259,191 @@ router.delete('/:id', authenticateToken, requirePermission('APPOINTMENTS', 'DELE
     res.status(500).json({
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al eliminar la cita'
+    });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
+// POST /api/appointments/import - Importar múltiples citas médicas (acepta JWT o API Key)
+router.post('/import', authenticateTokenOrApiKey, async (req, res) => {
+  let connection = null;
+  try {
+    const companyId = req.user?.companyId;
+    
+    if (!companyId) {
+      return res.status(400).json({ error: 'Usuario no tiene companyId asignado' });
+    }
+
+    const { appointments, options = {} } = req.body;
+    const { skipDuplicates = true, skipConflicts = true, allowPastDates = false } = options;
+
+    if (!Array.isArray(appointments) || appointments.length === 0) {
+      return res.status(400).json({
+        error: 'Datos inválidos',
+        message: 'Se requiere un array de citas con al menos un elemento'
+      });
+    }
+
+    if (appointments.length > 500) {
+      return res.status(400).json({
+        error: 'Límite excedido',
+        message: 'No se pueden importar más de 500 citas a la vez'
+      });
+    }
+
+    connection = await getCompanyConnection(companyId);
+    await ensureTables(connection);
+
+    const results = {
+      total: appointments.length,
+      created: 0,
+      skipped: 0,
+      errors: []
+    };
+
+    // Procesar cada cita
+    for (let i = 0; i < appointments.length; i++) {
+      const appointmentData = appointments[i];
+      
+      try {
+        // Crear un esquema de validación que permita fechas pasadas si allowPastDates es true
+        const importSchema = appointmentCreateSchema.keys({
+          appointmentDate: allowPastDates 
+            ? Joi.date().required().messages({
+                'any.required': 'La fecha de la cita es requerida'
+              })
+            : appointmentCreateSchema.extract('appointmentDate')
+        });
+
+        // Validar datos de la cita
+        const { error, value } = importSchema.validate(appointmentData);
+        if (error) {
+          results.errors.push({
+            index: i,
+            data: appointmentData,
+            error: 'Datos inválidos',
+            details: error.details.map(detail => detail.message)
+          });
+          results.skipped++;
+          continue;
+        }
+
+        const validatedData = value;
+
+        // Verificar si el paciente existe
+        const [patientResult] = await connection.execute(
+          'SELECT id FROM patients WHERE id = ?',
+          [validatedData.patientId]
+        );
+
+        if (patientResult.length === 0) {
+          results.errors.push({
+            index: i,
+            data: appointmentData,
+            error: 'Paciente no encontrado',
+            message: `El paciente con ID ${validatedData.patientId} no existe`
+          });
+          results.skipped++;
+          continue;
+        }
+
+        // Verificar si el doctor existe y es médico
+        const [doctorResult] = await connection.execute(
+          'SELECT id, role FROM users WHERE id = ? AND role = ?',
+          [validatedData.doctorId, 'medical_user']
+        );
+
+        if (doctorResult.length === 0) {
+          results.errors.push({
+            index: i,
+            data: appointmentData,
+            error: 'Doctor no encontrado',
+            message: `El doctor con ID ${validatedData.doctorId} no existe o no es un usuario médico`
+          });
+          results.skipped++;
+          continue;
+        }
+
+        // Verificar conflictos de horario si skipConflicts es true
+        if (skipConflicts) {
+          const [conflictResult] = await connection.execute(
+            `SELECT id FROM appointments 
+             WHERE doctor_id = ? 
+             AND appointment_date = ? 
+             AND status NOT IN ('CANCELADA', 'NO_ASISTIO')
+             AND appointment_time = ?`,
+            [
+              validatedData.doctorId,
+              validatedData.appointmentDate,
+              validatedData.appointmentTime
+            ]
+          );
+
+          if (conflictResult.length > 0) {
+            results.errors.push({
+              index: i,
+              data: appointmentData,
+              error: 'Conflicto de horario',
+              message: 'El doctor ya tiene una cita programada en ese horario'
+            });
+            results.skipped++;
+            continue;
+          }
+        }
+
+        // Insertar nueva cita
+        const appointmentId = uuidv4();
+        const insuranceJson = validatedData.insurance ? JSON.stringify(validatedData.insurance) : null;
+        const modalityValue = validatedData.modality || 'PRESENCIAL';
+        
+        await connection.execute(
+          `INSERT INTO appointments (
+            id, patient_id, doctor_id, appointment_date, appointment_time, duration,
+            type, modality, status, reason, notes, insurance, specialty_id, created_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            appointmentId,
+            validatedData.patientId,
+            validatedData.doctorId,
+            validatedData.appointmentDate,
+            validatedData.appointmentTime,
+            validatedData.duration || 30,
+            validatedData.type,
+            modalityValue,
+            validatedData.status || 'PROGRAMADA',
+            validatedData.reason || null,
+            validatedData.notes || null,
+            insuranceJson,
+            validatedData.specialtyId || null,
+            req.user.id
+          ]
+        );
+        
+        results.created++;
+
+      } catch (error) {
+        console.error(`Error procesando cita ${i}:`, error);
+        results.errors.push({
+          index: i,
+          data: appointmentData,
+          error: error.message || 'Error desconocido'
+        });
+        results.skipped++;
+      }
+    }
+
+    res.status(200).json({
+      message: 'Importación completada',
+      results
+    });
+
+  } catch (error) {
+    console.error('Error en importación de citas:', error);
+    res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'Ocurrió un error al importar las citas',
+      details: error.message
     });
   } finally {
     if (connection) await connection.close();

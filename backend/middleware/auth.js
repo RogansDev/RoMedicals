@@ -210,8 +210,127 @@ const generateToken = (userId, email, role) => {
   );
 };
 
+// Middleware para autenticación con API Key
+const authenticateApiKey = async (req, res, next) => {
+  const mysql = require('mysql2/promise');
+  
+  // Obtener API key y secret de los headers
+  const apiKey = req.headers['x-api-key'];
+  const apiSecret = req.headers['x-api-secret'];
+
+  if (!apiKey || !apiSecret) {
+    return res.status(401).json({
+      error: 'API credentials requeridas',
+      message: 'Debe proporcionar X-API-Key y X-API-Secret en los headers'
+    });
+  }
+
+  try {
+    const mainDbConfig = {
+      host: process.env.DB_HOST || 'localhost',
+      user: process.env.DB_USER || 'root',
+      password: process.env.DB_PASSWORD || '',
+      database: process.env.DB_NAME || 'romedicals_main',
+      charset: 'utf8mb4'
+    };
+
+    const connection = await mysql.createConnection(mainDbConfig);
+
+    // Buscar API key en la base de datos
+    const [apiKeys] = await connection.execute(
+      `SELECT 
+        ak.id,
+        ak.company_id,
+        ak.api_key,
+        ak.api_secret,
+        ak.is_active,
+        ak.expires_at,
+        ak.last_used_at,
+        c.companyName
+      FROM api_keys ak
+      JOIN companies c ON ak.company_id = c.id
+      WHERE ak.api_key = ? AND ak.is_active = true`,
+      [apiKey]
+    );
+
+    await connection.close();
+
+    if (apiKeys.length === 0) {
+      return res.status(401).json({
+        error: 'API key inválida',
+        message: 'La API key proporcionada no existe o está desactivada'
+      });
+    }
+
+    const apiKeyData = apiKeys[0];
+
+    // Verificar que el secret coincida
+    if (apiKeyData.api_secret !== apiSecret) {
+      return res.status(401).json({
+        error: 'API secret inválido',
+        message: 'El API secret proporcionado no es correcto'
+      });
+    }
+
+    // Verificar expiración
+    if (apiKeyData.expires_at && new Date(apiKeyData.expires_at) < new Date()) {
+      return res.status(401).json({
+        error: 'API key expirada',
+        message: 'La API key ha expirado'
+      });
+    }
+
+    // Actualizar último uso
+    try {
+      const updateConnection = await mysql.createConnection(mainDbConfig);
+      await updateConnection.execute(
+        'UPDATE api_keys SET last_used_at = NOW() WHERE id = ?',
+        [apiKeyData.id]
+      );
+      await updateConnection.close();
+    } catch (updateError) {
+      console.warn('Error actualizando last_used_at:', updateError.message);
+    }
+
+    // Agregar información al request
+    req.user = {
+      id: null, // No hay usuario específico con API key
+      email: null,
+      role: 'api_user', // Rol especial para API keys
+      companyId: apiKeyData.company_id,
+      apiKeyId: apiKeyData.id,
+      apiKeyName: apiKeyData.name || null
+    };
+
+    next();
+  } catch (error) {
+    console.error('Error en autenticación con API key:', error);
+    return res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'Ocurrió un error al verificar las credenciales de API'
+    });
+  }
+};
+
+// Middleware que acepta tanto JWT como API Key
+const authenticateTokenOrApiKey = async (req, res, next) => {
+  // Verificar si hay API key en los headers
+  const apiKey = req.headers['x-api-key'];
+  const apiSecret = req.headers['x-api-secret'];
+
+  if (apiKey && apiSecret) {
+    // Usar autenticación con API key
+    return authenticateApiKey(req, res, next);
+  } else {
+    // Usar autenticación con JWT
+    return authenticateToken(req, res, next);
+  }
+};
+
 module.exports = {
   authenticateToken,
+  authenticateApiKey,
+  authenticateTokenOrApiKey,
   requireRole,
   requirePermission,
   hashPassword,

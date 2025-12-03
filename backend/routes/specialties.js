@@ -1,7 +1,7 @@
 const express = require('express');
 const Joi = require('joi');
 const { query } = require('../config/database');
-const { authenticateToken, requirePermission } = require('../middleware/auth');
+const { authenticateTokenOrApiKey, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -47,8 +47,8 @@ const templateUpdateSchema = Joi.object({
   isActive: Joi.boolean().optional()
 });
 
-// GET /api/specialties - Listar especialidades
-router.get('/', authenticateToken, async (req, res) => {
+// GET /api/specialties - Listar especialidades (acepta JWT o API Key)
+router.get('/', authenticateTokenOrApiKey, async (req, res) => {
   try {
     const { isActive = '' } = req.query;
     
@@ -452,6 +452,126 @@ router.delete('/:id', authenticateToken, requirePermission('USERS', 'DELETE'), a
     res.status(500).json({
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al eliminar la especialidad'
+    });
+  }
+});
+
+// POST /api/specialties/import - Importar múltiples especialidades (acepta JWT o API Key)
+router.post('/import', authenticateTokenOrApiKey, async (req, res) => {
+  try {
+    const { specialties, options = {} } = req.body;
+    const { skipDuplicates = true, updateExisting = false } = options;
+
+    if (!Array.isArray(specialties) || specialties.length === 0) {
+      return res.status(400).json({
+        error: 'Datos inválidos',
+        message: 'Se requiere un array de especialidades con al menos un elemento'
+      });
+    }
+
+    if (specialties.length > 500) {
+      return res.status(400).json({
+        error: 'Límite excedido',
+        message: 'No se pueden importar más de 500 especialidades a la vez'
+      });
+    }
+
+    const results = {
+      total: specialties.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      errors: []
+    };
+
+    // Procesar cada especialidad
+    for (let i = 0; i < specialties.length; i++) {
+      const specialtyData = specialties[i];
+      
+      try {
+        // Validar datos de la especialidad
+        const { error, value } = specialtySchema.validate(specialtyData);
+        if (error) {
+          results.errors.push({
+            index: i,
+            data: specialtyData,
+            error: 'Datos inválidos',
+            details: error.details.map(detail => detail.message)
+          });
+          results.skipped++;
+          continue;
+        }
+
+        const validatedData = value;
+
+        // Verificar si ya existe una especialidad con el mismo nombre
+        const existingSpecialty = await query(
+          'SELECT id FROM specialties WHERE LOWER(name) = LOWER($1)',
+          [validatedData.name]
+        );
+
+        if (existingSpecialty.rows.length > 0) {
+          if (skipDuplicates && !updateExisting) {
+            results.skipped++;
+            continue;
+          }
+
+          if (updateExisting) {
+            // Actualizar especialidad existente
+            await query(
+              `UPDATE specialties 
+               SET description = $1, code = $2, is_active = $3, updated_at = NOW()
+               WHERE id = $4`,
+              [
+                validatedData.description || null,
+                validatedData.code || null,
+                validatedData.isActive !== undefined ? validatedData.isActive : true,
+                existingSpecialty.rows[0].id
+              ]
+            );
+            results.updated++;
+          } else {
+            results.skipped++;
+          }
+          continue;
+        }
+
+        // Crear nueva especialidad
+        const newSpecialtyResult = await query(
+          `INSERT INTO specialties (name, description, code, is_active, created_at)
+           VALUES ($1, $2, $3, $4, NOW())
+           RETURNING *`,
+          [
+            validatedData.name,
+            validatedData.description || null,
+            validatedData.code || null,
+            validatedData.isActive !== undefined ? validatedData.isActive : true
+          ]
+        );
+        results.created++;
+
+      } catch (error) {
+        console.error(`Error procesando especialidad ${i}:`, error);
+        results.errors.push({
+          index: i,
+          data: specialtyData,
+          error: error.message || 'Error desconocido'
+        });
+        results.skipped++;
+      }
+    }
+
+    res.status(200).json({
+      message: 'Importación completada',
+      results
+    });
+
+  } catch (error) {
+    console.error('Error en importación de especialidades:', error);
+    res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'Ocurrió un error al importar las especialidades',
+      details: error.message
     });
   }
 });

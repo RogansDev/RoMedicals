@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import appointmentService from '../services/appointmentService';
 import api from '../config/api';
-import { CalendarIcon, ClockIcon, PatientIcon, DoctorIcon, ConsultIcon, VideoCallIcon, UsersIcon } from './icons/AppIcons';
+import { CalendarIcon, ClockIcon, PatientIcon, DoctorIcon, ConsultIcon, VideoCallIcon, UsersIcon, PersonIcon } from './icons/AppIcons';
 
 const DoctorDashboard = () => {
   const navigate = useNavigate();
@@ -274,7 +274,8 @@ const DoctorDashboard = () => {
           ultimaVisita: apt.patient_last_visit || 'N/A',
           avatar: avatar,
           appointmentId: apt.id,
-          patientId: apt.patient_id
+          patientId: apt.patient_id,
+          isTelemedicine: (apt.modality || apt.type || '').toLowerCase().includes('telemedicina')
         };
       });
 
@@ -477,7 +478,11 @@ const DoctorDashboard = () => {
                   onClick={() => navigate(`/consultation/${cita.patientId}`)}
                   className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
                 >
-                  <VideoCallIcon width={18} height={18} stroke="white" />
+                  {cita.isTelemedicine ? (
+                    <VideoCallIcon width={18} height={18} stroke="white" />
+                  ) : (
+                    <PersonIcon width={18} height={18} stroke="white" />
+                  )}
                   Empezar consulta
                 </button>
               </div>

@@ -5,7 +5,7 @@ import appointmentService from '../services/appointmentService';
 import api, { consultationTemplatesAPI } from '../config/api';
 import toast from 'react-hot-toast';
 import OverlaySelect from './OverlaySelect';
-import { MeetingProvider, useMeeting, useParticipant } from '@videosdk.live/react-sdk';
+import { MeetingProvider, useMeeting, useParticipant, useTranscription } from '@videosdk.live/react-sdk';
 import {
   MicIconActive,
   MicIconInactive,
@@ -18,7 +18,7 @@ import {
   UserIcon,
   CloseXIcon
 } from './icons/VideoCallIcons';
-import { MicrophoneIcon, BrainIcon, DocumentIcon, AllergyIcon, ConditionsIcon, ArrowRightIcon } from './icons/AppIcons';
+import { MicrophoneIcon, BrainIcon, DocumentIcon, AllergyIcon, ConditionsIcon, ArrowRightIcon, RipsStarIcon, RefreshIcon, CloseXIcon as CloseXIconRips } from './icons/AppIcons';
 
 const MedicalConsultation = () => {
   const { patientId } = useParams();
@@ -96,6 +96,15 @@ const MedicalConsultation = () => {
   const [meetingId, setMeetingId] = useState(null);
   const [token, setToken] = useState(null);
   const [isMeetingJoined, setIsMeetingJoined] = useState(false);
+  const [isMeetingEnded, setIsMeetingEnded] = useState(false); // Estado para saber si la reunión fue finalizada
+  const meetingInitializedRef = useRef(false); // Ref para evitar múltiples inicializaciones
+  const hasJoinedMeetingRef = useRef(false); // Ref global para evitar múltiples join()
+  
+  // Estados para transcripción de VideoSDK
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcriptionText, setTranscriptionText] = useState('');
+  const [fullTranscript, setFullTranscript] = useState(''); // Transcripción completa acumulada
+  const fullTranscriptRef = useRef(''); // Ref para mantener el valor actualizado
   
   // Estados para el chat
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -123,10 +132,23 @@ const MedicalConsultation = () => {
   };
   
   // Debug: Ver cambios en isTelemedicine (después de declarar el estado)
+  // y notificar al Layout sobre el estado de telemedicina
   useEffect(() => {
     console.log('🔄 isTelemedicine cambió a:', isTelemedicine);
     console.log('🔄 currentAppointment:', currentAppointment);
-  }, [isTelemedicine, currentAppointment]);
+    
+    // Notificar al Layout sobre el estado de telemedicina
+    window.dispatchEvent(new CustomEvent('telemedicine-status', {
+      detail: { isActive: isTelemedicine && !!meetingId }
+    }));
+    
+    // Limpiar al desmontar
+    return () => {
+      window.dispatchEvent(new CustomEvent('telemedicine-status', {
+        detail: { isActive: false }
+      }));
+    };
+  }, [isTelemedicine, currentAppointment, meetingId]);
 
   // Cargar datos del paciente y cita actual
   useEffect(() => {
@@ -732,6 +754,71 @@ const MedicalConsultation = () => {
     transcriptRef.current.interim = '';
     
     await sendAudioToAI(null);
+  };
+
+  // Función para procesar la transcripción de VideoSDK y enviarla a la IA
+  const processVideoSDKTranscript = async (transcript) => {
+    if (!transcript || !transcript.trim()) {
+      toast.error('No hay transcripción para procesar');
+      return;
+    }
+    
+    setRecordingState('processing');
+    
+    try {
+      await sendTranscriptToAI(transcript.trim());
+    } catch (error) {
+      console.error('Error procesando transcripción de VideoSDK:', error);
+      toast.error('Error al procesar la transcripción');
+      setRecordingState('idle');
+    }
+  };
+
+  // Función común para enviar transcripción a la IA
+  const sendTranscriptToAI = async (transcript) => {
+    console.log('📝 Enviando transcripción a la IA:', transcript.substring(0, 100) + '...');
+
+    if (!transcript) {
+      toast.error('No se captó transcripción. Vuelve a intentar.');
+      setRecordingState('idle');
+      setIsProcessing(false);
+      return;
+    }
+
+    // Preparar resumen del paciente para la IA
+    const patientSummary = patient ? {
+      id: patient.id,
+      firstName: patient.first_name,
+      lastName: patient.last_name,
+      birthDate: patient.birthDate,
+      age: getPatientAge(),
+      allergies: patient.allergies || null,
+      conditions: typeof patient.conditions === 'string' ? patient.conditions : null,
+      bloodType: patient.blood_type || null,
+    } : null;
+
+    const { data } = await api.post(
+      '/ai/consultation/process-transcript',
+      {
+        transcript,
+        templateId: selectedTemplateId,
+        language: 'es',
+        templateDef: selectedTemplateData,
+        patientSummary,
+      },
+      { timeout: 120000 }
+    );
+
+    console.log('📋 Respuesta de la IA:', data);
+
+    if (data.suggestions && typeof data.suggestions === 'object') {
+      setAiSuggestions(data.suggestions);
+      setRecordingState('suggestions');
+      toast.success('Sugerencias de la IA generadas');
+    } else {
+      toast.error('No se recibieron sugerencias de la IA');
+      setRecordingState('idle');
+    }
   };
 
   const sendAudioToAI = async (audioBlob) => {
@@ -1542,14 +1629,27 @@ const MedicalConsultation = () => {
     }
   };
 
-  // Inicializar meeting cuando es telemedicina
+  // Inicializar meeting cuando es telemedicina (solo una vez)
   useEffect(() => {
-    if (isTelemedicine && !meetingId) {
+    if (isTelemedicine && !meetingId && !meetingInitializedRef.current) {
+      meetingInitializedRef.current = true; // Marcar como inicializado
+      
+      console.log('🚀 Inicializando telemedicina...');
+      console.log('   - isTelemedicine:', isTelemedicine);
+      console.log('   - meetingId:', meetingId);
+      console.log('   - token actual:', token ? 'existe' : 'null');
+      
       // Primero obtener el token, luego crear el meeting
       const initializeMeeting = async () => {
+        console.log('📞 Llamando a generateToken...');
         const authToken = token || await generateToken();
+        console.log('🔑 Token obtenido:', authToken ? authToken.substring(0, 30) + '...' : 'NULL');
+        
         if (authToken && !meetingId) {
+          console.log('📹 Creando meeting...');
           await createMeeting();
+        } else {
+          console.error('❌ No se pudo obtener token o meetingId ya existe');
         }
       };
       
@@ -1559,56 +1659,233 @@ const MedicalConsultation = () => {
 
   // Componente interno para el video del participante
   const ParticipantVideo = ({ participantId }) => {
-    const { webcamStream, webcamOn, displayName, micOn } = useParticipant(participantId);
+    const { webcamStream, webcamOn, displayName, micOn, isLocal, micStream } = useParticipant(participantId);
     const webcamRef = useRef(null);
+    const audioRef = useRef(null);
 
+    // Manejar el stream de video
     useEffect(() => {
+      console.log(`📹 ParticipantVideo [${participantId}]:`, {
+        webcamOn,
+        hasStream: !!webcamStream,
+        hasTrack: webcamStream?.track ? true : false,
+        displayName,
+        isLocal
+      });
+      
       if (webcamStream && webcamRef.current) {
         const mediaStream = new MediaStream();
-        webcamStream.track && mediaStream.addTrack(webcamStream.track);
-        webcamRef.current.srcObject = mediaStream;
+        if (webcamStream.track) {
+          mediaStream.addTrack(webcamStream.track);
+          webcamRef.current.srcObject = mediaStream;
+          
+          // Intentar reproducir el video
+          webcamRef.current.play().catch(err => {
+            console.warn('Error al reproducir video:', err);
+          });
+        }
       }
-    }, [webcamStream]);
+    }, [webcamStream, webcamOn, participantId, displayName, isLocal]);
+
+    // Manejar el stream de audio (solo para participantes remotos)
+    useEffect(() => {
+      if (isLocal || !audioRef.current) return;
+      
+      const setupAudio = () => {
+        if (micStream && micStream.track) {
+          console.log(`🔊 Configurando audio para [${participantId}]:`, {
+            micOn,
+            trackEnabled: micStream.track.enabled,
+            trackReadyState: micStream.track.readyState
+          });
+          
+          const audioMediaStream = new MediaStream();
+          audioMediaStream.addTrack(micStream.track);
+          
+          // Solo actualizar si es diferente
+          if (audioRef.current.srcObject !== audioMediaStream) {
+            audioRef.current.srcObject = audioMediaStream;
+          }
+          
+          // Asegurar que no esté silenciado
+          audioRef.current.muted = false;
+          audioRef.current.volume = 1.0;
+          
+          // Intentar reproducir el audio con retry
+          const playAudio = () => {
+            if (audioRef.current) {
+              audioRef.current.play()
+                .then(() => {
+                  console.log(`✅ Audio reproduciéndose para [${participantId}]`);
+                })
+                .catch(err => {
+                  console.warn(`⚠️ Error al reproducir audio [${participantId}]:`, err);
+                  // Reintentar después de un pequeño delay
+                  setTimeout(playAudio, 500);
+                });
+            }
+          };
+          
+          playAudio();
+        }
+      };
+      
+      // Ejecutar setup inmediatamente y también cuando micOn cambie
+      setupAudio();
+      
+      // También escuchar cuando el track se habilite
+      if (micStream?.track) {
+        const handleTrackEnabled = () => {
+          console.log(`🎤 Track habilitado para [${participantId}]`);
+          setupAudio();
+        };
+        micStream.track.addEventListener('unmute', handleTrackEnabled);
+        return () => {
+          micStream.track.removeEventListener('unmute', handleTrackEnabled);
+        };
+      }
+    }, [micStream, micOn, isLocal, participantId]);
 
     if (!webcamOn) {
       return (
-        <div className="w-full h-full bg-[#292929] flex items-center justify-center">
+        <div className="w-full h-full bg-black flex items-center justify-center">
           <div className="text-center text-gray-400">
             <svg className="w-16 h-16 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                </svg>
+            </svg>
             <p className="text-sm">{displayName || 'Participante'}</p>
-            {!micOn && <p className="text-xs mt-2">Micrófono silenciado</p>}
-              </div>
-            </div>
+            {!micOn && <p className="text-xs mt-2">🔇 Micrófono silenciado</p>}
+          </div>
+          {/* Audio element para participantes remotos sin video */}
+          {!isLocal && <audio ref={audioRef} autoPlay playsInline />}
+        </div>
       );
     }
 
     return (
-      <video
-        ref={webcamRef}
-        autoPlay
-        playsInline
-        muted={false}
-        className="w-full h-full object-cover"
-      />
+      <div className="w-full h-full bg-black flex items-center justify-center overflow-hidden">
+        <video
+          ref={webcamRef}
+          autoPlay
+          playsInline
+          muted={isLocal} // Silenciar el video local para evitar eco
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+        />
+        {/* Audio element separado para participantes remotos */}
+        {!isLocal && <audio ref={audioRef} autoPlay playsInline />}
+      </div>
     );
   };
 
   // Componente interno para los controles de la reunión
   const MeetingControls = () => {
-    const { join, leave, toggleMic, toggleWebcam, micOn, webcamOn } = useMeeting();
+    const { join, leave, end, toggleMic, toggleWebcam, micOn, webcamOn } = useMeeting();
+    
+    // Usar useTranscription para las funciones de transcripción (según documentación VideoSDK)
+    const { startTranscription, stopTranscription } = useTranscription({
+      onTranscriptionStateChanged: (data) => {
+        console.log('📝 Estado de transcripción cambiado:', data);
+        const { status } = data;
+        // Solo actualizar el estado, el procesamiento se hace en el botón
+        if (status === 'TRANSCRIPTION_STARTED' || status === 'TRANSCRIPTION_STARTING') {
+          setIsTranscribing(true);
+          if (status === 'TRANSCRIPTION_STARTED') {
+            toast.success('Transcripción iniciada');
+          }
+        } else if (status === 'TRANSCRIPTION_STOPPED' || status === 'TRANSCRIPTION_STOPPING') {
+          if (status === 'TRANSCRIPTION_STOPPED') {
+            console.log('🛑 Transcripción detenida (evento recibido)');
+            setIsTranscribing(false);
+            toast('Transcripción detenida', { icon: 'ℹ️' });
+          }
+        }
+      },
+      onTranscriptionText: (data) => {
+        console.log('📝 Texto de transcripción recibido (RAW):', JSON.stringify(data));
+        console.log('📝 Tipo de data:', typeof data);
+        console.log('📝 Keys de data:', data ? Object.keys(data) : 'data es null/undefined');
+        
+        // Intentar diferentes formas de acceder a los datos
+        let text = null;
+        let participantName = null;
+        let type = null;
+        
+        if (data) {
+          // Intentar diferentes estructuras posibles
+          text = data.text || data.message || data.transcript || data.transcription;
+          participantName = data.participantName || data.participant || data.speaker || data.name;
+          type = data.type || data.kind || data.status;
+        }
+        
+        console.log('📝 Valores extraídos:', { text, participantName, type });
+        
+        // Acumular TODOS los textos (parciales y finales) en el ref
+        if (text && text.trim()) {
+          const formattedText = `[${participantName || 'Participante'}]: ${text}\n`;
+          setFullTranscript(prev => {
+            const newValue = prev + formattedText;
+            fullTranscriptRef.current = newValue; // Actualizar ref también
+            console.log('📝 Transcripción acumulada. Total:', newValue.length, 'caracteres');
+            console.log('📝 Último fragmento:', formattedText.substring(0, 100));
+            return newValue;
+          });
+        } else {
+          console.log('⚠️ Texto vacío o no encontrado en data');
+        }
+      }
+    });
     
     // Estados locales para rastrear los valores reales de VideoSDK
     const [micState, setMicState] = useState(true); // Por defecto activo según config
     const [webcamState, setWebcamState] = useState(true); // Por defecto activo según config
 
-    // Unirse automáticamente cuando el componente se monta
+    // Log para verificar que el hook useTranscription está funcionando
     useEffect(() => {
-      if (!isMeetingJoined) {
-        console.log('🎥 Uniéndose automáticamente a la videollamada...');
-        join();
-        setIsMeetingJoined(true);
+      console.log('📝 Hook useTranscription montado. isTranscribing:', isTranscribing);
+      console.log('📝 fullTranscript actual:', fullTranscriptRef.current?.substring(0, 100) || 'vacío');
+    }, [isTranscribing]);
+
+    // Escuchar evento de finalizar llamada desde el Layout (termina para todos)
+    useEffect(() => {
+      const handleEndCallFromLayout = () => {
+        console.log('📞 Finalizando llamada para TODOS desde el Layout...');
+        // Detener transcripción si está activa
+        if (isTranscribing) {
+          stopTranscription();
+        }
+        // Usar end() para terminar la reunión para todos los participantes
+        end();
+        setIsMeetingJoined(false);
+        setIsMeetingEnded(true); // Marcar como finalizada para evitar reconexión
+        hasJoinedMeetingRef.current = true; // Mantener en true para evitar reconexión automática
+        setMeetingId(null); // Limpiar el meetingId
+        setToken(null); // Limpiar el token
+        toast.success('Videollamada finalizada para todos los participantes');
+        
+        // Notificar al Layout que la telemedicina ya no está activa
+        window.dispatchEvent(new CustomEvent('telemedicine-status', {
+          detail: { isActive: false }
+        }));
+      };
+      
+      window.addEventListener('end-telemedicine-call', handleEndCallFromLayout);
+      return () => window.removeEventListener('end-telemedicine-call', handleEndCallFromLayout);
+    }, [end, isTranscribing, stopTranscription]);
+
+    // Unirse automáticamente cuando el componente se monta
+    // Usamos la ref global para evitar múltiples llamadas a join()
+    // NO unirse si la reunión fue finalizada
+    useEffect(() => {
+      if (!isMeetingJoined && !hasJoinedMeetingRef.current && !isMeetingEnded) {
+        hasJoinedMeetingRef.current = true;
+        // Pequeño delay para asegurar que el SDK esté completamente inicializado
+        const timer = setTimeout(() => {
+          console.log('🎥 Uniéndose automáticamente a la videollamada...');
+          join();
+          setIsMeetingJoined(true);
+        }, 500);
+        
+        return () => clearTimeout(timer);
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); // Solo ejecutar una vez al montar
@@ -1635,9 +1912,19 @@ const MedicalConsultation = () => {
     };
 
     const handleLeave = () => {
-      leave();
+      // Usar end() para terminar la reunión para todos
+      end();
       setIsMeetingJoined(false);
-      toast.info('Has salido de la videollamada');
+      setIsMeetingEnded(true);
+      hasJoinedMeetingRef.current = true;
+      setMeetingId(null);
+      setToken(null);
+      toast.success('Videollamada finalizada');
+      
+      // Notificar al Layout
+      window.dispatchEvent(new CustomEvent('telemedicine-status', {
+        detail: { isActive: false }
+      }));
     };
 
     // Handlers para prevenir que el evento se pase a VideoSDK (evita error de estructura circular)
@@ -1765,6 +2052,85 @@ const MedicalConsultation = () => {
         >
           <ChatIcon width={20} height={20} stroke="white" strokeWidth={1.5} />
         </button>
+        
+        {/* Botón de Transcripción AI (VideoSDK) */}
+        <button
+          onClick={() => {
+            if (isTranscribing) {
+              // Detener transcripción
+              console.log('🛑 Deteniendo transcripción de VideoSDK...');
+              setIsTranscribing(false);
+              
+              if (typeof stopTranscription === 'function') {
+                stopTranscription();
+              }
+              
+              // Procesar transcripción inmediatamente después de detener
+              // Usar un delay para asegurar que todos los callbacks de transcripción se hayan ejecutado
+              setTimeout(() => {
+                const transcriptToProcess = fullTranscriptRef.current || fullTranscript;
+                console.log('📝 Longitud de transcripción capturada:', transcriptToProcess.length);
+                console.log('📝 Transcripción completa:', transcriptToProcess.substring(0, 200) + '...');
+                
+                if (transcriptToProcess.trim()) {
+                  // Mostrar la transcripción completa
+                  setTranscriptionText(transcriptToProcess);
+                  console.log('📤 Enviando transcripción a la IA:', transcriptToProcess.substring(0, 100) + '...');
+                  processVideoSDKTranscript(transcriptToProcess);
+                } else {
+                  console.log('⚠️ No hay transcripción para procesar (vacía)');
+                  toast('No se capturó transcripción', { icon: '⚠️' });
+                }
+              }, 1500); // Delay para asegurar que todos los eventos de transcripción se hayan procesado
+            } else {
+              // Iniciar transcripción
+              console.log('▶️ Iniciando transcripción de VideoSDK...');
+              console.log('startTranscription disponible:', typeof startTranscription);
+              
+              if (typeof startTranscription === 'function') {
+                setTranscriptionText('');
+                setFullTranscript('');
+                fullTranscriptRef.current = ''; // Limpiar ref también
+                try {
+                  console.log('📝 Iniciando transcripción con config:', { language: 'es', provider: 'deepgram' });
+                  // Intentar diferentes formatos según la documentación de VideoSDK
+                  const result = startTranscription({
+                    language: 'es',
+                    provider: 'deepgram'
+                  });
+                  console.log('📝 Resultado de startTranscription:', result);
+                  setIsTranscribing(true);
+                  toast.success('Transcripción iniciada. Habla para comenzar...');
+                } catch (err) {
+                  console.error('❌ Error al iniciar transcripción:', err);
+                  console.error('❌ Stack trace:', err.stack);
+                  toast.error('Error al iniciar la transcripción. Verifica tu plan de VideoSDK.');
+                }
+              } else {
+                console.error('❌ startTranscription no está disponible en el SDK');
+                console.error('❌ Tipo de startTranscription:', typeof startTranscription);
+                toast.error('La transcripción no está disponible. Verifica tu plan de VideoSDK.');
+              }
+            }
+          }}
+          className={`w-10 h-10 rounded-full flex items-center justify-center text-white transition-all duration-200 ${
+            isTranscribing 
+              ? 'bg-red-600 hover:bg-red-700 animate-pulse' 
+              : 'bg-[#292929]/60 hover:bg-[#292929]/80'
+          }`}
+          title={isTranscribing ? 'Detener transcripción AI' : 'Iniciar transcripción AI'}
+        >
+          {isTranscribing ? (
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M6 6h12v12H6z"/>
+            </svg>
+          ) : (
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+            </svg>
+          )}
+        </button>
+        
         <button
           onClick={handleLeave}
           className="w-10 h-10 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center text-white"
@@ -1788,39 +2154,92 @@ const MedicalConsultation = () => {
 
   // Componente interno para la vista de la reunión
   const MeetingView = () => {
-    const { participants, localParticipant } = useMeeting();
-    const participantsArray = Array.from(participants.values());
+    const { participants, localParticipant, meetingId: currentMeetingId } = useMeeting();
     
-    // Video principal (primer participante remoto o local)
-    const mainParticipant = participantsArray[0] || localParticipant;
-    // Video pequeño (local si hay remotos, o null)
-    const smallParticipant = participantsArray.length > 0 ? localParticipant : null;
+    // Filtrar solo participantes remotos (excluir el local y duplicados)
+    const localId = localParticipant?.id;
+    const localName = localParticipant?.displayName;
+    
+    // Obtener IDs únicos ya mostrados para evitar duplicados
+    const seenIds = new Set();
+    const seenNames = new Set();
+    
+    const remoteParticipants = Array.from(participants.values()).filter(p => {
+      // Excluir si es el participante local por ID
+      if (localId && p.id === localId) return false;
+      // Excluir si tiene la propiedad isLocal = true
+      if (p.isLocal === true) return false;
+      // Excluir si tiene el mismo displayName que el local (posible duplicado)
+      if (localName && p.displayName === localName) return false;
+      // Excluir duplicados por ID
+      if (seenIds.has(p.id)) return false;
+      // Excluir duplicados por nombre (mismo usuario conectado múltiples veces)
+      if (seenNames.has(p.displayName)) return false;
+      
+      seenIds.add(p.id);
+      seenNames.add(p.displayName);
+      return true;
+    });
+    
+    // Debug: ver estado de participantes
+    useEffect(() => {
+      console.log('👥 MeetingView - Estado de participantes:');
+      console.log('   - meetingId:', currentMeetingId);
+      console.log('   - localParticipant ID:', localId);
+      console.log('   - Total en participants Map:', participants.size);
+      console.log('   - participantes remotos filtrados:', remoteParticipants.length);
+      
+      // Mostrar todos los participantes para debug
+      Array.from(participants.values()).forEach((p, i) => {
+        console.log(`   - Participante ${i}:`, { 
+          id: p.id, 
+          displayName: p.displayName, 
+          isLocal: p.isLocal,
+          isLocalById: p.id === localId
+        });
+      });
+    }, [localParticipant, participants, remoteParticipants, currentMeetingId, localId]);
 
-        return (
+    return (
       <div className="flex-1 relative bg-[#5D5D5D] min-h-[400px]">
-        {/* Video principal */}
-        {mainParticipant && (
+        {/* Video principal - Participantes remotos */}
+        {remoteParticipants.length > 0 ? (
           <div className="absolute inset-0">
-            <ParticipantVideo participantId={mainParticipant.id} />
+            {/* Si hay un solo participante remoto, mostrarlo en pantalla completa */}
+            {remoteParticipants.length === 1 ? (
+              <ParticipantVideo participantId={remoteParticipants[0].id} />
+            ) : (
+              /* Si hay múltiples participantes, mostrarlos en grid */
+              <div className={`grid gap-2 w-full h-full p-2 ${
+                remoteParticipants.length === 2 ? 'grid-cols-2' :
+                remoteParticipants.length <= 4 ? 'grid-cols-2 grid-rows-2' :
+                'grid-cols-3 grid-rows-2'
+              }`}>
+                {remoteParticipants.slice(0, 6).map(participant => (
+                  <div key={participant.id} className="bg-gray-800 rounded-lg overflow-hidden">
+                    <ParticipantVideo participantId={participant.id} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          /* Mensaje de espera cuando no hay participantes remotos */
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="text-center text-gray-400">
+              <svg className="w-20 h-20 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
+              <p className="text-lg font-medium">Esperando al paciente...</p>
+              <p className="text-sm mt-2 opacity-75">Comparte el enlace de la videollamada</p>
+            </div>
           </div>
         )}
         
-        {/* Video pequeño del doctor (esquina superior derecha) */}
-        {smallParticipant && (
-          <div className="absolute top-4 right-4 w-48 h-36 bg-gray-600 rounded-lg overflow-hidden border-2 border-white shadow-lg">
-            <ParticipantVideo participantId={smallParticipant.id} />
-          </div>
-        )}
-
-        {/* Placeholder si no hay participantes */}
-        {!mainParticipant && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center text-gray-400">
-              <svg className="w-16 h-16 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-              </svg>
-              <p className="text-sm">Esperando participantes...</p>
-            </div>
+        {/* Video pequeño del doctor (esquina superior derecha) - Siempre visible */}
+        {localParticipant && (
+          <div className="absolute top-4 right-4 w-48 h-36 bg-gray-800 rounded-lg overflow-hidden border-2 border-white shadow-lg z-10">
+            <ParticipantVideo participantId={localParticipant.id} />
           </div>
         )}
       </div>
@@ -1829,9 +2248,38 @@ const MedicalConsultation = () => {
 
   // Componente para el panel de video (siempre visible en telemedicina)
   const renderVideoPanel = () => {
+    // Mostrar estado de videollamada finalizada
+    if (isMeetingEnded) {
+      return (
+        <div className="w-full flex flex-col bg-gray-900 rounded-lg overflow-hidden min-h-[400px]">
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center text-white">
+              <div className="w-20 h-20 mx-auto mb-6 bg-green-600 rounded-full flex items-center justify-center">
+                <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-semibold mb-2">Videollamada finalizada</h3>
+              <p className="text-gray-400 text-sm mb-6">La sesión de telemedicina ha terminado</p>
+              <button
+                onClick={() => {
+                  setIsMeetingEnded(false);
+                  meetingInitializedRef.current = false;
+                  hasJoinedMeetingRef.current = false;
+                }}
+                className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+              >
+                Iniciar nueva llamada
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    
     if (!meetingId || !token) {
       return (
-        <div className="w-1/2 flex flex-col bg-gray-900 rounded-lg overflow-hidden">
+        <div className="w-full flex flex-col bg-gray-900 rounded-lg overflow-hidden min-h-[400px]">
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center text-gray-400">
               <div className="relative w-16 h-16 mx-auto mb-4">
@@ -1845,10 +2293,38 @@ const MedicalConsultation = () => {
       );
     }
 
-    // Obtener nombre del usuario actual
+    // Obtener nombre del usuario actual (mostrar como Doctor)
     const user = JSON.parse(localStorage.getItem('user') || '{}');
-    const userName = user.name || user.firstName || 'Doctor';
+    const baseName = user.name || user.firstName || 'Usuario';
+    // Verificar si es doctor por rol o por contexto (estamos en consulta médica = es doctor)
+    const userRole = (user.role || '').toLowerCase();
+    const isDoctor = userRole === 'doctor' || userRole === 'medico' || userRole === 'physician';
+    const userName = isDoctor ? `Dr. ${baseName}` : `Dr. ${baseName}`; // En consulta siempre es doctor
+    console.log('👤 Usuario para videollamada:', { baseName, userRole, isDoctor, userName });
 
+    // Debug: verificar token antes de renderizar MeetingProvider
+    console.log('🎥 Renderizando MeetingProvider con:');
+    console.log('   - meetingId:', meetingId);
+    console.log('   - token (primeros 50 chars):', token ? token.substring(0, 50) + '...' : 'NULL');
+    console.log('   - userName:', userName);
+    
+    if (!token) {
+      console.error('❌ ERROR: Token es null o undefined al renderizar MeetingProvider');
+      return (
+        <div className="w-full flex flex-col bg-gray-900 rounded-lg overflow-hidden p-4">
+          <div className="text-center text-red-400">
+            <p>Error: No se pudo obtener el token de autenticación</p>
+            <button 
+              onClick={createMeeting}
+              className="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg"
+            >
+              Reintentar
+            </button>
+          </div>
+        </div>
+      );
+    }
+    
     return (
       <MeetingProvider
         config={{
@@ -2148,47 +2624,40 @@ const MedicalConsultation = () => {
       
       case 'diagnostico':
         return (
-          <div className="h-[calc(100vh-300px)] overflow-y-auto">
-            <div className="p-8 space-y-12">
-              {/* Sección Diagnóstico */}
-              <div>
-                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Diagnostico</h2>
-                
-                {/* Caja de resumen RIPS */}
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 mb-6">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-4 flex-1">
-                      <div className="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
-                        <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-              </div>
-                      <div className="flex-1">
-                        <h3 className="font-semibold text-gray-800 mb-2">Resumen médico (RIPS) generado por inteligencia artificial.</h3>
-                        <p className="text-sm text-gray-600">
-                          Diagnostico basado en la historia clínica y los datos del paciente. Es responsabilidad del profesional revisar y modificarlos en caso de ser necesario.
-                        </p>
-                      </div>
+          <div className="p-8 space-y-12">
+            {/* Sección Diagnóstico */}
+            <div>
+              <h2 className="text-2xl font-semibold text-gray-800 mb-4">Diagnostico</h2>
+              
+              {/* Caja de resumen RIPS */}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 mb-6">
+                <div className="flex flex-col lg:flex-row items-start justify-between gap-4">
+                  <div className="flex items-start gap-4 flex-1 min-w-0">
+                    <div className="w-10 h-10 bg-white rounded-lg flex items-center justify-center flex-shrink-0">
+                      <RipsStarIcon width={20} height={20} stroke="#155DFC" />
                     </div>
-                    <div className="flex gap-2 ml-4">
-                      <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm flex items-center gap-2">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                        <span>Generar un nuevo RIPS</span>
-                      </button>
-                      <button className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm flex items-center gap-2">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                        <span>Borrar todos los datos</span>
-                      </button>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-semibold text-gray-800 mb-2">Resumen médico (RIPS) generado por inteligencia artificial.</h3>
+                      <p className="text-sm text-gray-600">
+                        Diagnostico basado en la historia clínica y los datos del paciente. Es responsabilidad del profesional revisar y modificarlos en caso de ser necesario.
+                      </p>
                     </div>
                   </div>
-            </div>
+                  <div className="flex flex-col sm:flex-row gap-2 w-full lg:w-auto lg:ml-4">
+                    <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm flex items-center justify-center gap-2 whitespace-nowrap">
+                      <RefreshIcon width={16} height={16} stroke="#FFFFFF" />
+                      <span>Generar un nuevo RIPS</span>
+                    </button>
+                    <button className="px-4 py-2 bg-white hover:bg-gray-50 text-red-600 border border-red-600 rounded-lg text-sm flex items-center justify-center gap-2 whitespace-nowrap">
+                      <CloseXIconRips width={14} height={14} fill="#9F0712" />
+                      <span>Borrar todos los datos</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
 
-                {/* Campos de diagnóstico */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Campos de diagnóstico - Una sola columna */}
+              <div className="grid grid-cols-1 gap-6">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Causa externa</label>
                     <OverlaySelect
@@ -2364,7 +2833,6 @@ const MedicalConsultation = () => {
                   <p className="text-gray-600">Sección de análisis (a implementar)</p>
                 </div>
               </div>
-            </div>
 
             {/* Botón Continuar */}
             <div className="mt-8 text-center">
@@ -2583,6 +3051,66 @@ const MedicalConsultation = () => {
                     <div className="rounded-lg overflow-hidden bg-gray-900">
                       {renderVideoPanel()}
                     </div>
+                    
+                    {/* Panel de transcripción VideoSDK - Solo visible cuando se está transcribiendo, procesando o hay sugerencias */}
+                    {(isTranscribing || recordingState === 'processing' || recordingState === 'suggestions') && (
+                      <div className="mt-4 bg-gray-50 rounded-lg p-4">
+                        {isTranscribing && (
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                                <span className="text-sm font-medium text-gray-700">Transcribiendo en vivo</span>
+                              </div>
+                              <span className="text-xs text-gray-500">VideoSDK AI</span>
+                            </div>
+                            
+                            {transcriptionText && (
+                              <div className="mt-3">
+                                <div className="text-xs text-gray-500 mb-1 font-medium">Transcripción en tiempo real</div>
+                                <div className="text-sm text-gray-800 bg-white border border-gray-200 rounded-lg p-3 max-h-40 overflow-auto whitespace-pre-wrap">
+                                  {transcriptionText}
+                                </div>
+                              </div>
+                            )}
+                            
+                            <p className="text-xs text-gray-500">
+                              La transcripción se enviará automáticamente a la IA cuando detengas la grabación.
+                            </p>
+                          </div>
+                        )}
+
+                        {recordingState === 'processing' && (
+                          <div className="text-center py-4">
+                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-2"></div>
+                            <p className="text-sm text-gray-600">Procesando transcripción y generando sugerencias...</p>
+                          </div>
+                        )}
+
+                        {recordingState === 'suggestions' && Object.keys(aiSuggestions).length > 0 && (
+                          <div className="space-y-3">
+                            <div className="text-sm font-medium text-green-700 flex items-center gap-2">
+                              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                              </svg>
+                              Sugerencias generadas
+                            </div>
+                            <p className="text-xs text-gray-500">Las sugerencias se muestran junto a cada campo en el formulario.</p>
+                            <button
+                              onClick={() => {
+                                setRecordingState('idle');
+                                setTranscriptionText('');
+                                setFullTranscript('');
+                                fullTranscriptRef.current = ''; // Limpiar ref también
+                              }}
+                              className="w-full py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm"
+                            >
+                              Nueva transcripción
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   
                   {/* Panel derecho - Contenido de la pestaña activa (50%) */}

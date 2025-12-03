@@ -28,6 +28,7 @@ import UserDetails from './components/UserDetails';
 import MedicalConsultation from './components/MedicalConsultation';
 import NewConsultation from './components/NewConsultation';
 import DoctorScheduleConfig from './components/DoctorScheduleConfig';
+import Integrations from './components/Integrations';
 
 // Componente para rutas protegidas por autenticación y/o rol
 const ProtectedRoute = ({ children, allowRoles = null, redirectTo = '/login' }) => {
@@ -178,6 +179,16 @@ function App() {
                 <Layout>
                   <Dashboard />
                 </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Integraciones API - Solo para super_user */}
+          <Route
+            path="/integrations"
+            element={
+              <ProtectedRoute allowRoles={["super_user"]}>
+                <Integrations />
               </ProtectedRoute>
             }
           />

@@ -495,6 +495,170 @@ export const ArrowRightIcon = ({
   </svg>
 );
 
+// Icono de Persona individual (para consulta presencial)
+export const PersonIcon = ({ 
+  width = 16, 
+  height = 16, 
+  stroke = "#6A7282",
+  fill = "none",
+  className = "",
+  ...props 
+}) => (
+  <svg 
+    width={width} 
+    height={height} 
+    viewBox="0 0 16 16" 
+    fill={fill} 
+    xmlns="http://www.w3.org/2000/svg"
+    className={className}
+    {...props}
+  >
+    <path 
+      d="M12.6507 14V12.6667C12.6507 11.9594 12.3698 11.2811 11.8697 10.781C11.3696 10.281 10.6913 10 9.98405 10H5.98405C5.27681 10 4.59853 10.281 4.09843 10.781C3.59833 11.2811 3.31738 11.9594 3.31738 12.6667V14" 
+      stroke={stroke} 
+      strokeWidth="1.33333" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    />
+    <path 
+      d="M7.98405 7.33333C9.45681 7.33333 10.6507 6.13943 10.6507 4.66667C10.6507 3.19391 9.45681 2 7.98405 2C6.51129 2 5.31738 3.19391 5.31738 4.66667C5.31738 6.13943 6.51129 7.33333 7.98405 7.33333Z" 
+      stroke={stroke} 
+      strokeWidth="1.33333" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+// Icono de Estrella RIPS (icono principal del resumen médico)
+export const RipsStarIcon = ({ 
+  width = 20, 
+  height = 20, 
+  stroke = "#155DFC",
+  fill = "none",
+  className = "",
+  ...props 
+}) => (
+  <svg 
+    width={width} 
+    height={height} 
+    viewBox="0 0 20 20" 
+    fill={fill} 
+    xmlns="http://www.w3.org/2000/svg"
+    className={className}
+    {...props}
+  >
+    <g clipPath="url(#clip0_1460_14285)">
+      <path 
+        d="M9.18022 2.34439C9.21593 2.15323 9.31737 1.98057 9.46697 1.85632C9.61658 1.73208 9.80492 1.66406 9.99939 1.66406C10.1939 1.66406 10.3822 1.73208 10.5318 1.85632C10.6814 1.98057 10.7829 2.15323 10.8186 2.34439L11.6944 6.97606C11.7566 7.30535 11.9166 7.60824 12.1536 7.8452C12.3905 8.08216 12.6934 8.24219 13.0227 8.30439L17.6544 9.18022C17.8456 9.21593 18.0182 9.31737 18.1425 9.46697C18.2667 9.61658 18.3347 9.80492 18.3347 9.99939C18.3347 10.1939 18.2667 10.3822 18.1425 10.5318C18.0182 10.6814 17.8456 10.7829 17.6544 10.8186L13.0227 11.6944C12.6934 11.7566 12.3905 11.9166 12.1536 12.1536C11.9166 12.3905 11.7566 12.6934 11.6944 13.0227L10.8186 17.6544C10.7829 17.8456 10.6814 18.0182 10.5318 18.1425C10.3822 18.2667 10.1939 18.3347 9.99939 18.3347C9.80492 18.3347 9.61658 18.2667 9.46697 18.1425C9.31737 18.0182 9.21593 17.8456 9.18022 17.6544L8.30439 13.0227C8.24219 12.6934 8.08216 12.3905 7.8452 12.1536C7.60824 11.9166 7.30535 11.7566 6.97606 11.6944L2.34439 10.8186C2.15323 10.7829 1.98057 10.6814 1.85632 10.5318C1.73208 10.3822 1.66406 10.1939 1.66406 9.99939C1.66406 9.80492 1.73208 9.61658 1.85632 9.46697C1.98057 9.31737 2.15323 9.21593 2.34439 9.18022L6.97606 8.30439C7.30535 8.24219 7.60824 8.08216 7.8452 7.8452C8.08216 7.60824 8.24219 7.30535 8.30439 6.97606L9.18022 2.34439Z" 
+        stroke={stroke} 
+        strokeWidth="1.66667" 
+        strokeLinecap="round" 
+        strokeLinejoin="round"
+      />
+      <path 
+        d="M16.668 1.66797V5.0013" 
+        stroke={stroke} 
+        strokeWidth="1.66667" 
+        strokeLinecap="round" 
+        strokeLinejoin="round"
+      />
+      <path 
+        d="M18.3333 3.33203H15" 
+        stroke={stroke} 
+        strokeWidth="1.66667" 
+        strokeLinecap="round" 
+        strokeLinejoin="round"
+      />
+      <path 
+        d="M3.33464 18.3333C4.25511 18.3333 5.0013 17.5871 5.0013 16.6667C5.0013 15.7462 4.25511 15 3.33464 15C2.41416 15 1.66797 15.7462 1.66797 16.6667C1.66797 17.5871 2.41416 18.3333 3.33464 18.3333Z" 
+        stroke={stroke} 
+        strokeWidth="1.66667" 
+        strokeLinecap="round" 
+        strokeLinejoin="round"
+      />
+    </g>
+    <defs>
+      <clipPath id="clip0_1460_14285">
+        <rect width="20" height="20" fill="white"/>
+      </clipPath>
+    </defs>
+  </svg>
+);
+
+// Icono de Refresh (para generar nuevo RIPS)
+export const RefreshIcon = ({ 
+  width = 16, 
+  height = 16, 
+  stroke = "#1447E6",
+  fill = "none",
+  className = "",
+  ...props 
+}) => (
+  <svg 
+    width={width} 
+    height={height} 
+    viewBox="0 0 16 16" 
+    fill={fill} 
+    xmlns="http://www.w3.org/2000/svg"
+    className={className}
+    {...props}
+  >
+    <path 
+      d="M2 8C2 6.4087 2.63214 4.88258 3.75736 3.75736C4.88258 2.63214 6.4087 2 8 2C9.67737 2.00631 11.2874 2.66082 12.4933 3.82667L14 5.33333" 
+      stroke={stroke} 
+      strokeWidth="1.33333" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    />
+    <path 
+      d="M14.0013 2V5.33333H10.668" 
+      stroke={stroke} 
+      strokeWidth="1.33333" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    />
+    <path 
+      d="M14 8C14 9.5913 13.3679 11.1174 12.2426 12.2426C11.1174 13.3679 9.5913 14 8 14C6.32263 13.9937 4.71265 13.3392 3.50667 12.1733L2 10.6667" 
+      stroke={stroke} 
+      strokeWidth="1.33333" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    />
+    <path 
+      d="M5.33333 10.668H2V14.0013" 
+      stroke={stroke} 
+      strokeWidth="1.33333" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+// Icono de Cerrar/X (para borrar datos)
+export const CloseXIcon = ({ 
+  width = 14, 
+  height = 14, 
+  fill = "#9F0712",
+  className = "",
+  ...props 
+}) => (
+  <svg 
+    width={width} 
+    height={height} 
+    viewBox="0 0 14 14" 
+    fill={fill} 
+    xmlns="http://www.w3.org/2000/svg"
+    className={className}
+    {...props}
+  >
+    <path 
+      d="M13.7949 12.8044C13.8599 12.8695 13.9115 12.9467 13.9467 13.0316C13.9819 13.1166 14 13.2077 14 13.2996C14 13.3916 13.9819 13.4827 13.9467 13.5677C13.9115 13.6526 13.8599 13.7298 13.7949 13.7949C13.7298 13.8599 13.6526 13.9115 13.5677 13.9467C13.4827 13.9819 13.3916 14 13.2996 14C13.2077 14 13.1166 13.9819 13.0316 13.9467C12.9467 13.9115 12.8695 13.8599 12.8044 13.7949L7 7.98957L1.19557 13.7949C1.06423 13.9262 0.886095 14 0.70035 14C0.514606 14 0.336469 13.9262 0.205128 13.7949C0.0737866 13.6635 3.66147e-09 13.4854 0 13.2996C-3.66147e-09 13.1139 0.0737866 12.9358 0.205128 12.8044L6.01043 7L0.205128 1.19557C0.0737866 1.06423 0 0.886095 0 0.70035C0 0.514606 0.0737866 0.336469 0.205128 0.205128C0.336469 0.0737866 0.514606 0 0.70035 0C0.886095 0 1.06423 0.0737866 1.19557 0.205128L7 6.01043L12.8044 0.205128C12.9358 0.0737866 13.1139 -3.66147e-09 13.2996 0C13.4854 3.66147e-09 13.6635 0.0737866 13.7949 0.205128C13.9262 0.336469 14 0.514606 14 0.70035C14 0.886095 13.9262 1.06423 13.7949 1.19557L7.98957 7L13.7949 12.8044Z" 
+      fill={fill}
+    />
+  </svg>
+);
+
 export default {
   HomeIcon,
   UsersIcon,
@@ -510,6 +674,10 @@ export default {
   DocumentIcon,
   AllergyIcon,
   ConditionsIcon,
-  ArrowRightIcon
+  ArrowRightIcon,
+  PersonIcon,
+  RipsStarIcon,
+  RefreshIcon,
+  CloseXIcon
 };
 

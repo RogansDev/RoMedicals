@@ -1,7 +1,7 @@
 const express = require('express');
 const Joi = require('joi');
 const { query } = require('../config/database');
-const { authenticateToken, requirePermission } = require('../middleware/auth');
+const { authenticateTokenOrApiKey, requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -73,8 +73,8 @@ const medicalHistorySchema = Joi.object({
   medicalHistory: Joi.string().allow('').required()
 });
 
-// GET /api/patients - Listar pacientes con filtros
-router.get('/', authenticateToken, requirePermission('PATIENTS', 'READ'), async (req, res) => {
+// GET /api/patients - Listar pacientes con filtros (acepta JWT o API Key)
+router.get('/', authenticateTokenOrApiKey, async (req, res) => {
   try {
     console.log('🔎 GET /api/patients called with query:', req.query);
     const { 
@@ -194,8 +194,8 @@ router.get('/', authenticateToken, requirePermission('PATIENTS', 'READ'), async 
   }
 });
 
-// GET /api/patients/:id - Obtener paciente específico
-router.get('/:id', authenticateToken, requirePermission('PATIENTS', 'READ'), async (req, res) => {
+// GET /api/patients/:id - Obtener paciente específico (acepta JWT o API Key)
+router.get('/:id', authenticateTokenOrApiKey, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -531,6 +531,211 @@ router.delete('/:id', authenticateToken, requirePermission('PATIENTS', 'DELETE')
     res.status(500).json({
       error: 'Error interno del servidor',
       message: 'Ocurrió un error al eliminar el paciente'
+    });
+  }
+});
+
+// POST /api/patients/import - Importar múltiples pacientes (acepta JWT o API Key)
+router.post('/import', authenticateTokenOrApiKey, async (req, res) => {
+  try {
+    const { patients, options = {} } = req.body;
+    const { skipDuplicates = true, updateExisting = false } = options;
+
+    if (!Array.isArray(patients) || patients.length === 0) {
+      return res.status(400).json({
+        error: 'Datos inválidos',
+        message: 'Se requiere un array de pacientes con al menos un elemento'
+      });
+    }
+
+    if (patients.length > 1000) {
+      return res.status(400).json({
+        error: 'Límite excedido',
+        message: 'No se pueden importar más de 1000 pacientes a la vez'
+      });
+    }
+
+    const results = {
+      total: patients.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      errors: []
+    };
+
+    // Procesar cada paciente
+    for (let i = 0; i < patients.length; i++) {
+      const patientData = patients[i];
+      
+      try {
+        // Validar datos del paciente
+        const { error, value } = patientSchema.validate(patientData);
+        if (error) {
+          results.errors.push({
+            index: i,
+            data: patientData,
+            error: 'Datos inválidos',
+            details: error.details.map(detail => detail.message)
+          });
+          results.skipped++;
+          continue;
+        }
+
+        const validatedData = value;
+
+        // Verificar si ya existe un paciente con el mismo documento
+        const existingPatient = await query(
+          'SELECT id FROM patients WHERE identification_type = $1 AND identification_number = $2',
+          [validatedData.identificationType, validatedData.identificationNumber]
+        );
+
+        if (existingPatient.rows.length > 0) {
+          if (skipDuplicates && !updateExisting) {
+            results.skipped++;
+            continue;
+          }
+
+          if (updateExisting) {
+            // Actualizar paciente existente
+            const birthDate = validatedData.birthYear && validatedData.birthMonth && validatedData.birthDay 
+              ? `${validatedData.birthYear}-${getMonthNumber(validatedData.birthMonth)}-${validatedData.birthDay.padStart(2, '0')}`
+              : null;
+
+            await query(
+              `UPDATE patients SET
+                guardian_id = $1, first_name = $2, last_name = $3, identification_type = $4,
+                identification_number = $5, residence_country = $6, origin_country = $7,
+                is_foreigner = $8, gender = $9, birth_date = $10, blood_type = $11,
+                disability = $12, occupation = $13, marital_status = $14, education_level = $15,
+                activity_profession = $16, patient_type = $17, eps = $18, email = $19,
+                address = $20, city = $21, department = $22, residential_zone = $23,
+                landline_phone = $24, mobile_phone_country = $25, mobile_phone = $26,
+                companion_name = $27, companion_phone = $28, responsible_name = $29,
+                responsible_phone = $30, responsible_relationship = $31, agreement = $32,
+                observations = $33, reference = $34, updated_at = NOW()
+              WHERE id = $35`,
+              [
+                validatedData.guardianId || null,
+                validatedData.firstName,
+                validatedData.lastName,
+                validatedData.identificationType,
+                validatedData.identificationNumber,
+                validatedData.residenceCountry || null,
+                validatedData.originCountry || null,
+                validatedData.isForeigner || false,
+                validatedData.gender,
+                birthDate,
+                validatedData.bloodType || null,
+                validatedData.disability || null,
+                validatedData.occupation || null,
+                validatedData.maritalStatus || null,
+                validatedData.educationLevel || null,
+                validatedData.activityProfession || null,
+                validatedData.patientType || null,
+                validatedData.eps || null,
+                validatedData.email || null,
+                validatedData.address || null,
+                validatedData.city || null,
+                validatedData.department || null,
+                validatedData.residentialZone || null,
+                validatedData.landlinePhone || null,
+                validatedData.mobilePhoneCountry || null,
+                validatedData.mobilePhone || null,
+                validatedData.companionName || null,
+                validatedData.companionPhone || null,
+                validatedData.responsibleName || null,
+                validatedData.responsiblePhone || null,
+                validatedData.responsibleRelationship || null,
+                validatedData.agreement || null,
+                validatedData.observations || null,
+                validatedData.reference || null,
+                existingPatient.rows[0].id
+              ]
+            );
+            results.updated++;
+          } else {
+            results.skipped++;
+          }
+          continue;
+        }
+
+        // Crear nuevo paciente
+        const birthDate = validatedData.birthYear && validatedData.birthMonth && validatedData.birthDay 
+          ? `${validatedData.birthYear}-${getMonthNumber(validatedData.birthMonth)}-${validatedData.birthDay.padStart(2, '0')}`
+          : null;
+
+        await query(
+          `INSERT INTO patients (
+            guardian_id, first_name, last_name, identification_type, identification_number,
+            residence_country, origin_country, is_foreigner, gender, birth_date,
+            blood_type, disability, occupation, marital_status, education_level,
+            activity_profession, patient_type, eps, email, address, city, department,
+            residential_zone, landline_phone, mobile_phone_country, mobile_phone,
+            companion_name, companion_phone, responsible_name, responsible_phone,
+            responsible_relationship, agreement, observations, reference, created_by
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)`,
+          [
+            validatedData.guardianId || null,
+            validatedData.firstName,
+            validatedData.lastName,
+            validatedData.identificationType,
+            validatedData.identificationNumber,
+            validatedData.residenceCountry || null,
+            validatedData.originCountry || null,
+            validatedData.isForeigner || false,
+            validatedData.gender,
+            birthDate,
+            validatedData.bloodType || null,
+            validatedData.disability || null,
+            validatedData.occupation || null,
+            validatedData.maritalStatus || null,
+            validatedData.educationLevel || null,
+            validatedData.activityProfession || null,
+            validatedData.patientType || null,
+            validatedData.eps || null,
+            validatedData.email || null,
+            validatedData.address || null,
+            validatedData.city || null,
+            validatedData.department || null,
+            validatedData.residentialZone || null,
+            validatedData.landlinePhone || null,
+            validatedData.mobilePhoneCountry || null,
+            validatedData.mobilePhone || null,
+            validatedData.companionName || null,
+            validatedData.companionPhone || null,
+            validatedData.responsibleName || null,
+            validatedData.responsiblePhone || null,
+            validatedData.responsibleRelationship || null,
+            validatedData.agreement || null,
+            validatedData.observations || null,
+            validatedData.reference || null,
+            req.user.id
+          ]
+        );
+        results.created++;
+
+      } catch (error) {
+        console.error(`Error procesando paciente ${i}:`, error);
+        results.errors.push({
+          index: i,
+          data: patientData,
+          error: error.message || 'Error desconocido'
+        });
+        results.skipped++;
+      }
+    }
+
+    res.status(200).json({
+      message: 'Importación completada',
+      results
+    });
+
+  } catch (error) {
+    console.error('Error en importación de pacientes:', error);
+    res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'Ocurrió un error al importar los pacientes',
+      details: error.message
     });
   }
 });

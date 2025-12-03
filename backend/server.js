@@ -47,7 +47,7 @@ const mainDbConfig = {
 // Pool de conexiones para la base de datos principal
 const mainDbPool = mysql.createPool(mainDbConfig);
 
-// Middleware para verificar autenticación
+// Middleware para verificar autenticación con JWT
 const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -73,6 +73,79 @@ const authenticateToken = async (req, res, next) => {
     }
     return res.status(403).json({ message: 'Token inválido', error: error.message });
   }
+};
+
+// Middleware para autenticación con API Key o JWT (para integraciones)
+const authenticateApiKeyOrToken = async (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  const apiSecret = req.headers['x-api-secret'];
+
+  // Si viene API Key + Secret, usar autenticación por API Key
+  if (apiKey && apiSecret) {
+    try {
+      // Buscar API key en la base de datos principal
+      const [rows] = await mainDbPool.execute(
+        `SELECT id, company_id, api_key, api_secret, is_active, expires_at
+         FROM api_keys
+         WHERE api_key = ? AND is_active = true`,
+        [apiKey]
+      );
+
+      if (rows.length === 0) {
+        return res.status(401).json({
+          error: 'API key inválida',
+          message: 'La API key proporcionada no existe o está desactivada'
+        });
+      }
+
+      const key = rows[0];
+
+      if (key.api_secret !== apiSecret) {
+        return res.status(401).json({
+          error: 'API secret inválido',
+          message: 'El API secret proporcionado no es correcto'
+        });
+      }
+
+      if (key.expires_at && new Date(key.expires_at) < new Date()) {
+        return res.status(401).json({
+          error: 'API key expirada',
+          message: 'La API key ha expirado'
+        });
+      }
+
+      // Actualizar último uso
+      try {
+        await mainDbPool.execute(
+          'UPDATE api_keys SET last_used_at = NOW() WHERE id = ?',
+          [key.id]
+        );
+      } catch (updateError) {
+        console.warn('⚠️ Error actualizando last_used_at de API key:', updateError.message);
+      }
+
+      // Para integraciones tratamos la API key como un super_user de la empresa
+      req.user = {
+        id: null,
+        email: null,
+        role: 'super_user',
+        companyId: key.company_id,
+        apiKeyId: key.id
+      };
+
+      console.log('✅ Autenticación por API key correcta para empresa:', key.company_id);
+      return next();
+    } catch (error) {
+      console.error('❌ Error en autenticación con API key:', error.message);
+      return res.status(500).json({
+        error: 'Error interno del servidor',
+        message: 'Ocurrió un error al verificar las credenciales de API'
+      });
+    }
+  }
+
+  // Si no hay API key, usar autenticación por JWT normal
+  return authenticateToken(req, res, next);
 };
 
 // Middleware para verificar roles
@@ -903,7 +976,7 @@ app.post('/api/doctor-onboarding/complete', authenticateToken, requireRole(['med
 // ==================== ENDPOINTS DE EMPRESA ====================
 
 // Obtener especialidades de la empresa
-app.get('/api/specialties', authenticateToken, requireRole(['super_user', 'medical_user', 'administrative', 'nursing']), async (req, res) => {
+app.get('/api/specialties', authenticateApiKeyOrToken, requireRole(['super_user', 'medical_user', 'administrative', 'nursing']), async (req, res) => {
   let connection;
   try {
     console.log('🔍 Obteniendo especialidades, req.user:', req.user);
@@ -924,8 +997,8 @@ app.get('/api/specialties', authenticateToken, requireRole(['super_user', 'medic
 
 // ==================== PACIENTES (EMPRESA) ====================
 
-// Listar pacientes con paginación básica
-app.get('/api/patients', authenticateToken, requireRole(['super_user', 'medical_user', 'administrative', 'nursing']), async (req, res) => {
+// Listar pacientes con paginación básica (acepta JWT o API Key)
+app.get('/api/patients', authenticateApiKeyOrToken, requireRole(['super_user', 'medical_user', 'administrative', 'nursing']), async (req, res) => {
   let connection;
   try {
     connection = await getCompanyConnection(req);
@@ -1010,8 +1083,8 @@ app.get('/api/patients', authenticateToken, requireRole(['super_user', 'medical_
   }
 });
 
-// Obtener paciente por ID (empresa)
-app.get('/api/patients/:id', authenticateToken, requireRole(['super_user', 'medical_user', 'administrative', 'nursing']), async (req, res) => {
+// Obtener paciente por ID (empresa) - acepta JWT o API Key
+app.get('/api/patients/:id', authenticateApiKeyOrToken, requireRole(['super_user', 'medical_user', 'administrative', 'nursing']), async (req, res) => {
   let connection;
   try {
     console.log('🔍 Obteniendo paciente por ID:', req.params.id);
@@ -1211,6 +1284,163 @@ app.post('/api/patients', authenticateToken, requireRole(['super_user', 'adminis
   }
 });
 
+// POST /api/patients/import - Importar múltiples pacientes (MySQL)
+// Acepta JWT (super_user, administrative) o API Key (empresa)
+app.post('/api/patients/import', authenticateApiKeyOrToken, requireRole(['super_user', 'administrative']), async (req, res) => {
+  let connection;
+  try {
+    const { patients, options = {} } = req.body;
+    const { skipDuplicates = true, updateExisting = false } = options;
+
+    if (!Array.isArray(patients) || patients.length === 0) {
+      return res.status(400).json({
+        error: 'Datos inválidos',
+        message: 'Se requiere un array de pacientes con al menos un elemento'
+      });
+    }
+
+    if (patients.length > 1000) {
+      return res.status(400).json({
+        error: 'Límite excedido',
+        message: 'No se pueden importar más de 1000 pacientes a la vez'
+      });
+    }
+
+    connection = await getCompanyConnection(req);
+
+    const results = {
+      total: patients.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      errors: []
+    };
+
+    // Función auxiliar para convertir mes a número
+    const getMonthNumber = (monthName) => {
+      const months = {
+        'Enero': '01', 'Febrero': '02', 'Marzo': '03', 'Abril': '04',
+        'Mayo': '05', 'Junio': '06', 'Julio': '07', 'Agosto': '08',
+        'Septiembre': '09', 'Octubre': '10', 'Noviembre': '11', 'Diciembre': '12'
+      };
+      return months[monthName] || '01';
+    };
+
+    // Procesar cada paciente
+    for (let i = 0; i < patients.length; i++) {
+      const patientData = patients[i];
+      
+      try {
+        // Validaciones básicas
+        if (!patientData.firstName || !patientData.lastName || !patientData.identificationNumber) {
+          results.errors.push({
+            index: i,
+            data: patientData,
+            error: 'Datos inválidos',
+            message: 'Nombre, apellido y número de identificación son requeridos'
+          });
+          results.skipped++;
+          continue;
+        }
+
+        const identificationType = patientData.identificationType || 'CC';
+        const identificationNumber = patientData.identificationNumber;
+
+        // Verificar si ya existe un paciente con el mismo documento
+        const [existing] = await connection.execute(
+          'SELECT id FROM patients WHERE documentType = ? AND documentNumber = ?',
+          [identificationType, identificationNumber]
+        );
+
+        if (existing.length > 0) {
+          if (skipDuplicates && !updateExisting) {
+            results.skipped++;
+            continue;
+          }
+
+          if (updateExisting) {
+            // Actualizar paciente existente
+            const birthDate = patientData.birthYear && patientData.birthMonth && patientData.birthDay
+              ? `${patientData.birthYear}-${getMonthNumber(patientData.birthMonth)}-${String(patientData.birthDay).padStart(2, '0')}`
+              : null;
+
+            await connection.execute(
+              `UPDATE patients SET
+                firstName = ?, lastName = ?, documentType = ?, documentNumber = ?,
+                birthDate = ?, phone = ?, email = ?, address = ?, updatedAt = NOW()
+              WHERE id = ?`,
+              [
+                patientData.firstName,
+                patientData.lastName,
+                identificationType,
+                identificationNumber,
+                birthDate,
+                patientData.mobilePhone ? `${patientData.mobilePhoneCountry || '+57'} ${patientData.mobilePhone}` : null,
+                patientData.email || null,
+                patientData.address || null,
+                existing[0].id
+              ]
+            );
+            results.updated++;
+          } else {
+            results.skipped++;
+          }
+          continue;
+        }
+
+        // Crear nuevo paciente
+        const birthDate = patientData.birthYear && patientData.birthMonth && patientData.birthDay
+          ? `${patientData.birthYear}-${getMonthNumber(patientData.birthMonth)}-${String(patientData.birthDay).padStart(2, '0')}`
+          : null;
+
+        const patientId = uuidv4();
+        await connection.execute(
+          `INSERT INTO patients (
+            id, firstName, lastName, documentType, documentNumber, 
+            birthDate, phone, email, address, isActive, createdAt, updatedAt
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, true, NOW(), NOW())`,
+          [
+            patientId,
+            patientData.firstName,
+            patientData.lastName,
+            identificationType,
+            identificationNumber,
+            birthDate,
+            patientData.mobilePhone ? `${patientData.mobilePhoneCountry || '+57'} ${patientData.mobilePhone}` : null,
+            patientData.email || null,
+            patientData.address || null
+          ]
+        );
+        results.created++;
+
+      } catch (error) {
+        console.error(`Error procesando paciente ${i}:`, error);
+        results.errors.push({
+          index: i,
+          data: patientData,
+          error: error.message || 'Error desconocido'
+        });
+        results.skipped++;
+      }
+    }
+
+    res.status(200).json({
+      message: 'Importación completada',
+      results
+    });
+
+  } catch (error) {
+    console.error('Error en importación de pacientes:', error);
+    res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'Ocurrió un error al importar los pacientes',
+      details: error.message
+    });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
 // Crear nueva especialidad
 app.post('/api/specialties', authenticateToken, requireRole(['super_user']), async (req, res) => {
   let connection;
@@ -1253,6 +1483,121 @@ app.post('/api/specialties', authenticateToken, requireRole(['super_user']), asy
   } catch (error) {
     console.error('Error creando especialidad:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
+// POST /api/specialties/import - Importar múltiples especialidades (MySQL)
+app.post('/api/specialties/import', authenticateToken, requireRole(['super_user']), async (req, res) => {
+  let connection;
+  try {
+    const { specialties, options = {} } = req.body;
+    const { skipDuplicates = true, updateExisting = false } = options;
+
+    if (!Array.isArray(specialties) || specialties.length === 0) {
+      return res.status(400).json({
+        error: 'Datos inválidos',
+        message: 'Se requiere un array de especialidades con al menos un elemento'
+      });
+    }
+
+    if (specialties.length > 500) {
+      return res.status(400).json({
+        error: 'Límite excedido',
+        message: 'No se pueden importar más de 500 especialidades a la vez'
+      });
+    }
+
+    connection = await getCompanyConnection(req);
+
+    const results = {
+      total: specialties.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      errors: []
+    };
+
+    // Procesar cada especialidad
+    for (let i = 0; i < specialties.length; i++) {
+      const specialtyData = specialties[i];
+      
+      try {
+        // Validaciones básicas
+        if (!specialtyData.name || !specialtyData.name.trim()) {
+          results.errors.push({
+            index: i,
+            data: specialtyData,
+            error: 'Datos inválidos',
+            message: 'El nombre de la especialidad es requerido'
+          });
+          results.skipped++;
+          continue;
+        }
+
+        const name = specialtyData.name.trim();
+        const description = specialtyData.description || null;
+
+        // Verificar si ya existe una especialidad con el mismo nombre
+        const [existing] = await connection.execute(
+          'SELECT id FROM specialties WHERE name = ?',
+          [name]
+        );
+
+        if (existing.length > 0) {
+          if (skipDuplicates && !updateExisting) {
+            results.skipped++;
+            continue;
+          }
+
+          if (updateExisting) {
+            // Actualizar especialidad existente
+            await connection.execute(
+              `UPDATE specialties 
+               SET description = ?, updatedAt = NOW()
+               WHERE id = ?`,
+              [description, existing[0].id]
+            );
+            results.updated++;
+          } else {
+            results.skipped++;
+          }
+          continue;
+        }
+
+        // Crear nueva especialidad
+        const specialtyId = uuidv4();
+        await connection.execute(
+          `INSERT INTO specialties (id, name, description, isActive, createdAt, updatedAt)
+           VALUES (?, ?, ?, true, NOW(), NOW())`,
+          [specialtyId, name, description]
+        );
+        results.created++;
+
+      } catch (error) {
+        console.error(`Error procesando especialidad ${i}:`, error);
+        results.errors.push({
+          index: i,
+          data: specialtyData,
+          error: error.message || 'Error desconocido'
+        });
+        results.skipped++;
+      }
+    }
+
+    res.status(200).json({
+      message: 'Importación completada',
+      results
+    });
+
+  } catch (error) {
+    console.error('Error en importación de especialidades:', error);
+    res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'Ocurrió un error al importar las especialidades',
+      details: error.message
+    });
   } finally {
     if (connection) await connection.close();
   }
@@ -2302,6 +2647,28 @@ const initializeDatabase = async () => {
       )
     `);
     
+    // Crear tabla de API keys para integraciones
+    await mainDbPool.execute(`
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id VARCHAR(36) PRIMARY KEY,
+        company_id VARCHAR(36) NOT NULL,
+        api_key VARCHAR(255) UNIQUE NOT NULL,
+        api_secret VARCHAR(255) NOT NULL,
+        name VARCHAR(255),
+        description TEXT,
+        is_active BOOLEAN DEFAULT TRUE,
+        last_used_at TIMESTAMP NULL,
+        expires_at TIMESTAMP NULL,
+        created_by VARCHAR(36),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_company (company_id),
+        INDEX idx_api_key (api_key),
+        INDEX idx_active (is_active),
+        FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+      )
+    `);
+    
     // Crear administrador principal por defecto
     const [existingAdmin] = await mainDbPool.execute(
       'SELECT id FROM users WHERE role = "romedicals_admin"'
@@ -2344,6 +2711,11 @@ app.use('/api/appointments', appointmentsRouter);
 // Registrar rutas de VideoSDK
 app.use('/api/videosdk', videosdkRouter);
 console.log('✅ Ruta /api/videosdk registrada');
+
+// Registrar rutas de API Keys
+const apiKeysRouter = require('./routes/api-keys');
+app.use('/api/api-keys', apiKeysRouter);
+console.log('✅ Ruta /api/api-keys registrada');
 
 // ==================== INICIO DEL SERVIDOR ====================
 

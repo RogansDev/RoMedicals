@@ -1,15 +1,29 @@
 {
   "files": {
-    "main.css": "/static/css/main.d77d7c08.css",
-    "main.js": "/static/js/main.04ac06dc.js",
-    "static/js/453.670e15c7.chunk.js": "/static/js/453.670e15c7.chunk.js",
+    "main.css": "/static/css/main.b93f95d1.css",
+    "main.js": "/static/js/main.276ce276.js",
+    "static/js/453.54292a4b.chunk.js": "/static/js/453.54292a4b.chunk.js",
+    "static/media/bg-login.jpg": "/static/media/bg-login.c214ccc7eccd422957ee.jpg",
+    "static/media/logo-general.svg": "/static/media/logo-general.87cdf66a00659edac53016991ef7998a.svg",
+    "static/media/logo1.svg": "/static/media/logo1.88d52607a7326570782fea7a6522a71c.svg",
+    "static/media/powered.svg": "/static/media/powered.4e40a9ae6f2ae0320a8e4d4164c572c6.svg",
+    "static/media/img1.png": "/static/media/img1.4924ef3b6cc5b560ecf7.png",
+    "static/media/configuracion-icon.svg": "/static/media/configuracion-icon.e375a930b1c3760137d898d4a4ef60e1.svg",
+    "static/media/corazon-con-chulito.svg": "/static/media/corazon-con-chulito.6d47089c722348eb31319025bce49ce2.svg",
+    "static/media/ayuda-icon.svg": "/static/media/ayuda-icon.ae13f59b8ca4dd3ac38d7715297586e7.svg",
+    "static/media/medicos-icon.svg": "/static/media/medicos-icon.f9448fc2db800dfc5528a66fe20cf54e.svg",
+    "static/media/pacientes-icon.svg": "/static/media/pacientes-icon.b5dbeae9062f6c6e123169d3c7732b32.svg",
+    "static/media/segura.svg": "/static/media/segura.e63b5eab6b7d1005cf0afb1425161574.svg",
     "index.html": "/index.html",
-    "main.d77d7c08.css.map": "/static/css/main.d77d7c08.css.map",
-    "main.04ac06dc.js.map": "/static/js/main.04ac06dc.js.map",
-    "453.670e15c7.chunk.js.map": "/static/js/453.670e15c7.chunk.js.map"
+    "static/media/ArrowRight.svg": "/static/media/ArrowRight.5db6bdb855097c560e578db8dca159e3.svg",
+    "static/media/enfermeria-icon.svg": "/static/media/enfermeria-icon.bd34f48ac912076a4bdeb470d1ac99d8.svg",
+    "static/media/ArrowLeft.svg": "/static/media/ArrowLeft.32a256acd4faace7184dad2218436427.svg",
+    "main.b93f95d1.css.map": "/static/css/main.b93f95d1.css.map",
+    "main.276ce276.js.map": "/static/js/main.276ce276.js.map",
+    "453.54292a4b.chunk.js.map": "/static/js/453.54292a4b.chunk.js.map"
   },
   "entrypoints": [
-    "static/css/main.d77d7c08.css",
-    "static/js/main.04ac06dc.js"
+    "static/css/main.b93f95d1.css",
+    "static/js/main.276ce276.js"
   ]
 }
